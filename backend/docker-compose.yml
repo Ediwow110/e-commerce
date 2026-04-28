@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: luxe-commerce-postgres
+    environment:
+      POSTGRES_DB: luxe_commerce
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - luxe_pgdata:/var/lib/postgresql/data
+volumes:
+  luxe_pgdata:
