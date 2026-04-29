@@ -175,7 +175,13 @@ router.post('/auth/refresh', authLimiter, validate(refreshSchema), asyncHandler(
   const tokenHash = hashToken(refreshToken);
   const payload = verifyRefreshToken(refreshToken);
   const session = await prisma.refreshSession.findUnique({ where: { tokenHash } });
-  if (!session || session.revokedAt || session.expiresAt <= new Date()) throw new ApiError(401, 'Invalid refresh session');
+  if (!session) throw new ApiError(401, 'Invalid refresh session');
+  
+  // Grace Period: Allow tokens revoked in the last 60 seconds to prevent mobile disconnects
+  const isWithinGracePeriod = session.revokedAt && (new Date().getTime() - session.revokedAt.getTime() < 60_000);
+  if (session.revokedAt && !isWithinGracePeriod) throw new ApiError(401, 'Invalid refresh session');
+  if (session.expiresAt <= new Date()) throw new ApiError(401, 'Invalid refresh session');
+  
   const user = await prisma.user.findUnique({ where: { id: payload.id }, select: { id: true, name: true, email: true, role: true, avatarUrl: true, isActive: true } });
   if (!user || !user.isActive) throw new ApiError(401, 'Invalid refresh session');
   await prisma.refreshSession.update({ where: { tokenHash }, data: { revokedAt: new Date() } });
@@ -287,8 +293,23 @@ router.post('/auth/invite/accept', authLimiter, validate(inviteAcceptSchema), as
 }));
 
 router.get('/me', requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
-  const user = await prisma.user.findUnique({ where: { id: req.user!.id }, select: { id: true, name: true, email: true, role: true, phone: true, addresses: true } });
-  res.json({ success: true, data: user });
+  const user = await prisma.user.findUnique({ where: { id: req.user!.id }, include: { addresses: true } });
+  if (!user) throw new ApiError(404, 'User not found');
+  
+  // Map roles to capabilities
+  const capabilities: string[] = [];
+  if (user.role === 'SUPER_ADMIN') capabilities.push('all');
+  else if (user.role === 'ADMIN') capabilities.push('products:write', 'orders:read', 'customers:read', 'promos:write', 'reviews:write');
+  else if (user.role === 'STAFF') capabilities.push('products:read', 'orders:read', 'customers:read', 'shipping:write');
+  else if (user.role === 'CUSTOMER') capabilities.push('cart:write', 'wishlist:write', 'checkout:create', 'orders:read-own');
+  
+  res.json({ 
+    success: true, 
+    data: { 
+      ...user, 
+      capabilities 
+    } 
+  });
 }));
 
 router.get('/categories', asyncHandler(async (_req, res) => {
@@ -338,20 +359,45 @@ router.post('/cart', requireAuth, requirePermission('cart:write'), validate(cart
 router.post('/orders', requireAuth, requirePermission('checkout:create'), validate(orderCreateSchema), asyncHandler(async (req: AuthedRequest, res) => {
   const cart = await prisma.cartItem.findMany({ where: { userId: req.user!.id }, include: { product: true, variant: true } });
   if (!cart.length) throw new ApiError(422, 'Cart is empty');
-  for (const item of cart) {
-    if (!item.product.isActive) throw new ApiError(422, item.product.name + ' is no longer available');
-    if (item.variant && item.variant.stock < item.quantity) throw new ApiError(422, item.product.name + ' does not have enough stock');
-  }
   const subtotal = cart.reduce((sum, item) => sum + Number(item.product.salePrice ?? item.product.price) * item.quantity + Number(item.variant?.priceDelta ?? 0) * item.quantity, 0);
   const shippingFee = (req.body.shippingMethod === 'store_pickup') ? 0 : 150;
   const total = subtotal + shippingFee;
   const orderNumber = `LX-${new Date().getFullYear()}-${nanoid(8).toUpperCase()}`;
   const user = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
   const order = await prisma.$transaction(async tx => {
+    // 1. Check active status for all items first
+    for (const item of cart) {
+      const product = await tx.product.findUnique({ where: { id: item.productId } });
+      if (!product || !product.isActive) throw new ApiError(422, `${item.product.name} is no longer available`);
+    }
+
     const shippingMethod = req.body.shippingMethod ?? 'standard_delivery';
     const addressJson = shippingMethod === 'store_pickup' ? { type: 'STORE_PICKUP' } : req.body.deliveryAddress;
-    const created = await tx.order.create({ data: { orderNumber, userId: req.user!.id, subtotal, shippingFee, total, customerNote: req.body.customerNote, shipment: { create: { method: shippingMethod, addressJson } }, items: { create: cart.map(item => ({ productId: item.productId, variantId: item.variantId, name: item.product.name, sku: item.variant?.sku, unitPrice: Number(item.product.salePrice ?? item.product.price) + Number(item.variant?.priceDelta ?? 0), quantity: item.quantity, lineTotal: (Number(item.product.salePrice ?? item.product.price) + Number(item.variant?.priceDelta ?? 0)) * item.quantity })) } }, include: { items: true, shipment: true } });
-    for (const item of cart) if (item.variantId) await tx.productVariant.update({ where: { id: item.variantId }, data: { stock: { decrement: item.quantity } } });
+    
+    const created = await tx.order.create({ 
+      data: { 
+        orderNumber, userId: req.user!.id, subtotal, shippingFee, total, customerNote: req.body.customerNote, 
+        shipment: { create: { method: shippingMethod, addressJson } }, 
+        items: { create: cart.map(item => ({ 
+          productId: item.productId, variantId: item.variantId, name: item.product.name, sku: item.variant?.sku, 
+          unitPrice: Number(item.product.salePrice ?? item.product.price) + Number(item.variant?.priceDelta ?? 0), 
+          quantity: item.quantity, lineTotal: (Number(item.product.salePrice ?? item.product.price) + Number(item.variant?.priceDelta ?? 0)) * item.quantity 
+        })) } 
+      }, 
+      include: { items: true, shipment: true } 
+    });
+
+    // 2. Atomic Stock Decrement (Fixes Race Condition)
+    for (const item of cart) {
+      if (item.variantId) {
+        const updated = await tx.productVariant.updateMany({
+          where: { id: item.variantId, stock: { gte: item.quantity } },
+          data: { stock: { decrement: item.quantity } }
+        });
+        if (updated.count === 0) throw new ApiError(422, `Insufficient stock for ${item.product.name}`);
+      }
+    }
+
     await tx.cartItem.deleteMany({ where: { userId: req.user!.id } });
     return created;
   });
@@ -429,11 +475,18 @@ router.post('/payments/webhook/:provider', asyncHandler(async (req, res) => {
   if (!verifyWebhookSignature(rawBody, req.header('x-luxe-signature') || req.header('x-paymongo-signature') || req.header('x-callback-token'))) throw new ApiError(401, 'Invalid payment webhook signature');
   const provider = getStringParam(req.params.provider);
   const eventId = String(payload?.event_id || payload?.data?.id || payload?.id || payload?.reference || nanoid(16));
-  const existingEvent = await prisma.webhookEvent.findUnique({ where: { eventId } });
-  if (existingEvent?.processedAt) return res.json({ success: true, received: true, duplicate: true, provider });
-  const eventType = String(payload?.type || payload?.event || 'unknown');
-  await prisma.webhookEvent.upsert({ where: { eventId }, update: { payload: redactSensitiveMetadata(payload) as any }, create: { provider, eventId, eventType, payload: redactSensitiveMetadata(payload) as any } });
+  
+  // Atomic Idempotency Check: Attempt to mark as processed only if it was null.
+  const event = await prisma.webhookEvent.upsert({ 
+    where: { eventId }, 
+    update: { payload: redactSensitiveMetadata(payload) as any }, 
+    create: { provider, eventId, eventType: String(payload?.type || payload?.event || 'unknown'), payload: redactSensitiveMetadata(payload) as any } 
+  });
+
+  if (event.processedAt) return res.json({ success: true, received: true, duplicate: true, provider });
+
   const reference = payload?.data?.attributes?.reference_number || payload?.data?.attributes?.external_reference_number || payload?.data?.attributes?.metadata?.orderNumber || payload?.data?.attributes?.metadata?.orderId || payload?.data?.id || payload?.id || payload?.reference || payload?.external_id;
+  const eventType = String(payload?.type || payload?.event || 'unknown');
   const paidEventTypes: Record<string, string[]> = {
     paymongo: ['payment.paid', 'checkout_session.payment.paid'],
     xendit: ['invoice.paid'],
@@ -441,6 +494,7 @@ router.post('/payments/webhook/:provider', asyncHandler(async (req, res) => {
     manual: [],
     mock: ['mock.payment.paid']
   };
+
   if (reference && (paidEventTypes[provider] || []).includes(eventType)) {
     const payment = await prisma.payment.findFirst({ where: { OR: [{ reference }, { order: { orderNumber: reference } }] }, include: { order: true } });
     if (payment) {
@@ -448,10 +502,17 @@ router.post('/payments/webhook/:provider', asyncHandler(async (req, res) => {
       const currency = String(payload?.data?.attributes?.currency ?? payload?.currency ?? 'PHP').toUpperCase();
       if (amount && amount !== Number(payment.amount) && amount !== Math.round(Number(payment.amount) * 100)) throw new ApiError(422, 'Webhook amount mismatch');
       if (currency !== 'PHP') throw new ApiError(422, 'Webhook currency mismatch');
-      await prisma.payment.update({ where: { id: payment.id }, data: { status: 'PAID', paidAt: new Date(), metadata: redactSensitiveMetadata(payload) as any } });
-      await prisma.order.update({ where: { id: payment.orderId }, data: { paymentStatus: 'PAID', status: 'CONFIRMED' } });
-      await prisma.webhookEvent.update({ where: { eventId }, data: { processedAt: new Date() } });
+      
+      // Transactionally update payment, order, and mark event as processed
+      await prisma.$transaction([
+        prisma.payment.update({ where: { id: payment.id }, data: { status: 'PAID', paidAt: new Date(), metadata: redactSensitiveMetadata(payload) as any } }),
+        prisma.order.update({ where: { id: payment.orderId }, data: { paymentStatus: 'PAID', status: 'CONFIRMED' } }),
+        prisma.webhookEvent.update({ where: { eventId }, data: { processedAt: new Date() } })
+      ]);
     }
+  } else {
+    // If not a paid event, we still mark the event as processed to avoid re-running the logic
+    await prisma.webhookEvent.update({ where: { eventId }, data: { processedAt: new Date() } });
   }
   res.json({ success: true, received: true, provider });
 }));

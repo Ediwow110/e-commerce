@@ -1,9 +1,55 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, Suspense, lazy } from 'react';
 import Header from './components/Header.jsx';
 import Footer from './components/Footer.jsx';
 import AdminLayout from './components/AdminLayout.jsx';
 import { adminSignIn, clearAuthStorage, customerSignIn, logout as performLogout, refreshSession, signInWithGoogle, signUp } from './services/api.js';
-import { CustomerHome, ShopPage, CategoryPage, ProductPage, WishlistPage, CartPage, CheckoutPage, ConfirmationPage, TrackingPage, AccountPage, SearchPage, AboutPage, ContactPage, PoliciesPage, LoginPage, RegisterPage, ForgotPasswordPage, ResetPasswordPage, AcceptInvitePage, AdminLoginPage, AdminPage, SectionTitle } from './pages/Home.jsx';
+
+// Lazy loaded pages
+const CustomerHome = lazy(() => import('./pages/CustomerHome.jsx').then(m => ({ default: m.CustomerHome })));
+const ShopPage = lazy(() => import('./pages/ShopPage.jsx').then(m => ({ default: m.ShopPage })));
+const CategoryPage = lazy(() => import('./pages/CategoryPage.jsx').then(m => ({ default: m.CategoryPage })));
+const ProductPage = lazy(() => import('./pages/ProductPage.jsx').then(m => ({ default: m.ProductPage })));
+const WishlistPage = lazy(() => import('./pages/WishlistPage.jsx').then(m => ({ default: m.WishlistPage })));
+const CartPage = lazy(() => import('./pages/CartPage.jsx').then(m => ({ default: m.CartPage })));
+const CheckoutPage = lazy(() => import('./pages/CheckoutPage.jsx').then(m => ({ default: m.CheckoutPage })));
+const ConfirmationPage = lazy(() => import('./pages/ConfirmationPage.jsx').then(m => ({ default: m.ConfirmationPage })));
+const TrackingPage = lazy(() => import('./pages/TrackingPage.jsx').then(m => ({ default: m.TrackingPage })));
+const AccountPage = lazy(() => import('./pages/AccountPage.jsx').then(m => ({ default: m.AccountPage })));
+const SearchPage = lazy(() => import('./pages/SearchPage.jsx').then(m => ({ default: m.SearchPage })));
+const AboutPage = lazy(() => import('./pages/AboutPage.jsx').then(m => ({ default: m.AboutPage })));
+const ContactPage = lazy(() => import('./pages/ContactPage.jsx').then(m => ({ default: m.ContactPage })));
+const PoliciesPage = lazy(() => import('./pages/PoliciesPage.jsx').then(m => ({ default: m.PoliciesPage })));
+const LoginPage = lazy(() => import('./pages/LoginPage.jsx').then(m => ({ default: m.LoginPage })));
+const RegisterPage = lazy(() => import('./pages/RegisterPage.jsx').then(m => ({ default: m.RegisterPage })));
+const ForgotPasswordPage = lazy(() => import('./pages/ForgotPasswordPage.jsx').then(m => ({ default: m.ForgotPasswordPage })));
+const ResetPasswordPage = lazy(() => import('./pages/ResetPasswordPage.jsx').then(m => ({ default: m.ResetPasswordPage })));
+const AcceptInvitePage = lazy(() => import('./pages/AcceptInvitePage.jsx').then(m => ({ default: m.AcceptInvitePage })));
+const AdminLoginPage = lazy(() => import('./pages/AdminLoginPage.jsx').then(m => ({ default: m.AdminLoginPage })));
+const AdminPage = lazy(() => import('./pages/AdminPage.jsx').then(m => ({ default: m.AdminPage })));
+
+const ROUTES_CONFIG = {
+  home: { path: '/', component: CustomerHome },
+  shop: { path: '/shop', component: ShopPage },
+  category: { path: '/categories', component: CategoryPage },
+  product: { path: '/product', component: ProductPage },
+  wishlist: { path: '/wishlist', component: WishlistPage },
+  cart: { path: '/cart', component: CartPage },
+  checkout: { path: '/checkout', component: CheckoutPage },
+  confirmation: { path: '/order-confirmation', component: ConfirmationPage },
+  tracking: { path: '/track-order', component: TrackingPage },
+  account: { path: '/account', component: AccountPage },
+  search: { path: '/search', component: SearchPage },
+  about: { path: '/about', component: AboutPage },
+  contact: { path: '/contact', component: ContactPage },
+  policies: { path: '/policies', component: PoliciesPage },
+  'customer-login': { path: '/customer/login', component: LoginPage },
+  'customer-register': { path: '/customer/register', component: RegisterPage },
+  'forgot-password': { path: '/customer/forgot-password', component: ForgotPasswordPage },
+  'reset-password': { path: '/customer/reset-password', component: ResetPasswordPage },
+  'admin-login': { path: '/admin/login', component: AdminLoginPage },
+  'admin-accept-invite': { path: '/admin/accept-invite', component: AcceptInvitePage },
+  'admin-dashboard': { path: '/admin/dashboard', component: AdminPage },
+};
 
 const adminRoutes = ['admin-dashboard','admin-products','admin-variants','admin-categories','admin-inventory','admin-orders','admin-customers','admin-promos','admin-insights','admin-reviews','admin-reports','admin-payments','admin-shipping','admin-content','admin-users','admin-settings'];
 const customerProtectedRoutes = ['wishlist','checkout','confirmation','tracking','account'];
@@ -29,37 +75,15 @@ const adminRoutePermissions = {
 
 const pathToRoute = (path) => {
   const normalized = path.replace(/\/$/, '') || '/';
-  const map = {
-    '/': 'home',
-    '/shop': 'shop',
-    '/categories': 'category',
-    '/product': 'product',
-    '/wishlist': 'wishlist',
-    '/cart': 'cart',
-    '/checkout': 'checkout',
-    '/order-confirmation': 'confirmation',
-    '/track-order': 'tracking',
-    '/account': 'account',
-    '/search': 'search',
-    '/about': 'about',
-    '/contact': 'contact',
-    '/policies': 'policies',
-    '/customer/login': 'customer-login',
-    '/customer/register': 'customer-register',
-    '/customer/forgot-password': 'forgot-password',
-    '/customer/reset-password': 'reset-password',
-    '/admin/login': 'admin-login',
-    '/admin/accept-invite': 'admin-accept-invite',
-    '/admin/dashboard': 'admin-dashboard'
-  };
   if (normalized.startsWith('/admin/')) return 'admin-' + normalized.replace('/admin/', '').replace(/\//g, '-');
-  return map[normalized] || 'home';
+  const entry = Object.entries(ROUTES_CONFIG).find(([_, cfg]) => cfg.path === normalized);
+  return entry ? entry[0] : 'home';
 };
 
-const routeToPath = (route) => ({
-  home: '/', shop: '/shop', category: '/categories', product: '/product', wishlist: '/wishlist', cart: '/cart', checkout: '/checkout', confirmation: '/order-confirmation', tracking: '/track-order', account: '/account', search: '/search', about: '/about', contact: '/contact', policies: '/policies',
-  'customer-login': '/customer/login', 'customer-register': '/customer/register', 'forgot-password': '/customer/forgot-password', 'reset-password': '/customer/reset-password', 'admin-login': '/admin/login', 'admin-accept-invite': '/admin/accept-invite', 'admin-dashboard': '/admin/dashboard'
-}[route] || (route.startsWith('admin-') ? '/admin/' + route.replace('admin-', '').replace(/-/g, '/') : '/'));
+export const routeToPath = (route) => {
+  if (route.startsWith('admin-') && !ROUTES_CONFIG[route]) return '/admin/' + route.replace('admin-', '').replace(/-/g, '/');
+  return ROUTES_CONFIG[route]?.path || '/';
+};
 
 function canAccessAdminRoute(user, route) {
   if (!user || !adminRoles.includes(user.role)) return false;
@@ -67,7 +91,7 @@ function canAccessAdminRoute(user, route) {
 }
 
 function RestrictedPage({ title = 'Access restricted', message, action, setRoute }) {
-  return <section className="section-pad page center-card"><div className="success-card restricted-card"><SectionTitle eyebrow="Permission required" title={title} /><p>{message}</p>{action && <button className="pill dark" onClick={() => setRoute(action.route)}>{action.label}</button>}</div></section>;
+  return <section className="section-pad page center-card"><div className="success-card restricted-card"><div className="section-title"><span className="eyebrow">Permission required</span><h2>{title}</h2></div><p>{message}</p>{action && <button className="pill dark" onClick={() => setRoute(action.route)}>{action.label}</button>}</div></section>;
 }
 
 export default function App() {
@@ -158,29 +182,15 @@ export default function App() {
   else if (adminRoutes.includes(route)) {
     if (!user) page = <AdminLoginPage onLogin={adminLogin} />;
     else if (!canAccessAdminRoute(user, route)) page = <RestrictedPage setRoute={setRoute} title="Admin access restricted" message="Your role does not have permission to open this admin section." action={{ label: 'Back to dashboard', route: 'admin-dashboard' }} />;
-    else page = <AdminLayout route={route} setRoute={setRoute} user={user}><AdminPage route={route} user={user} /></AdminLayout>;
+    else page = <AdminLayout route={route} setRoute={setRoute} user={user}><Suspense fallback={<div className="summary-card">Loading admin section...</div>}><AdminPage route={route} user={user} /></Suspense></AdminLayout>;
   } else if (customerProtectedRoutes.includes(route) && !user) {
     page = <RestrictedPage setRoute={setRoute} title="Customer login required" message="Please sign in or create an account before accessing checkout, wishlist, order tracking, or account pages." action={{ label: 'Sign in', route: 'customer-login' }} />;
   } else if (customerProtectedRoutes.includes(route) && user?.role !== 'CUSTOMER') {
     page = <RestrictedPage setRoute={setRoute} title="Customer account required" message="Admin and staff accounts cannot place customer orders. Please use a customer account for shopping." action={{ label: 'Back to shop', route: 'shop' }} />;
   } else {
     const props = { setRoute, user, routeParams };
-    page = ({
-      home: <CustomerHome {...props} />,
-      shop: <ShopPage {...props} />,
-      category: <CategoryPage {...props} />,
-      product: <ProductPage {...props} />,
-      wishlist: <WishlistPage {...props} />,
-      cart: <CartPage {...props} />,
-      checkout: <CheckoutPage {...props} />,
-      confirmation: <ConfirmationPage {...props} />,
-      tracking: <TrackingPage {...props} />,
-      account: <AccountPage {...props} />,
-      search: <SearchPage {...props} />,
-      about: <AboutPage {...props} />,
-      contact: <ContactPage {...props} />,
-      policies: <PoliciesPage {...props} />
-    })[route] || <CustomerHome {...props} />;
+    const PageComponent = ROUTES_CONFIG[route]?.component || CustomerHome;
+    page = <Suspense fallback={<div className="summary-card">Loading page...</div>}><PageComponent {...props} /></Suspense>;
   }
 
   const showFooter = !route.startsWith('admin') && !['customer-login','customer-register','forgot-password','reset-password','admin-accept-invite'].includes(route);
