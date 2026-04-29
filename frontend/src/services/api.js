@@ -45,17 +45,17 @@ export const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 export const IS_DEMO_MODE = import.meta.env.DEV && !API_BASE_URL;
 
 function setAccessToken(token) {
-  if (token) localStorage.setItem('luxe-access-token', token);
+  window.luxeAccessToken = token;
 }
 
 export function clearAuthStorage() {
   localStorage.removeItem('luxe-user');
-  localStorage.removeItem('luxe-access-token');
+  window.luxeAccessToken = null;
 }
 
 export async function apiRequest(path, options = {}) {
   if (!API_BASE_URL) throw new Error('VITE_API_URL is not configured. Demo mode is available only in development.');
-  const token = localStorage.getItem('luxe-access-token');
+  const token = window.luxeAccessToken;
   const response = await fetch(API_BASE_URL + path, {
     ...options,
     credentials: 'include',
