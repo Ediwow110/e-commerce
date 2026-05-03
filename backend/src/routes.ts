@@ -10,7 +10,7 @@ import { ADMIN_ROLES, comparePassword, hashPassword, hashToken, requireAuth, req
 import { validate } from './validate.js';
 import { adminInvitationTemplate, orderConfirmationTemplate, orderReceiptTemplate, passwordResetTemplate, sendMail } from './mail.service.js';
 import { env } from './env.js';
-import { createPaymentCheckout, verifyWebhookSignature } from './payment.service.js';
+import { createPaymentCheckout, verifyProviderWebhookSignature } from './payment.service.js';
 
 export const router = Router();
 const googleClient = new OAuth2Client(env.GOOGLE_CLIENT_ID);
@@ -504,13 +504,20 @@ router.post('/orders', requireAuth, requirePermission('checkout:create'), valida
       include: { items: true, shipment: true }
     });
 
-    // Decrement stock atomically inside the same transaction
+    // FIX P0-004: Atomic conditional decrement.
+    // updateMany with `where: { stock: { gte: qty } }` ensures the row only
+    // updates when sufficient stock exists. If two concurrent transactions
+    // race past the earlier read, the loser's `count` will be 0 and we abort.
+    // This is the only correct way to prevent overselling under concurrency.
     for (const item of cart) {
       if (item.variantId) {
-        await tx.productVariant.update({
-          where: { id: item.variantId },
+        const result = await tx.productVariant.updateMany({
+          where: { id: item.variantId, stock: { gte: item.quantity } },
           data: { stock: { decrement: item.quantity } }
         });
+        if (result.count === 0) {
+          throw new ApiError(422, `${item.product.name} sold out before checkout completed`);
+        }
       }
     }
 
@@ -655,8 +662,10 @@ router.post('/payments/checkout', requireAuth, validate(paymentCheckoutSchema), 
 router.post('/payments/webhook/:provider', asyncHandler(async (req, res) => {
   const rawBody = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : JSON.stringify(req.body ?? {});
   const payload = Buffer.isBuffer(req.body) ? JSON.parse(rawBody || '{}') : req.body;
-  if (!verifyWebhookSignature(rawBody, req.header('x-luxe-signature') || req.header('x-paymongo-signature') || req.header('x-callback-token'))) throw new ApiError(401, 'Invalid payment webhook signature');
   const provider = getStringParam(req.params.provider);
+  if (!verifyProviderWebhookSignature(provider, rawBody, req.headers)) {
+    throw new ApiError(401, 'Invalid payment webhook signature');
+  }
   const eventId = String(payload?.event_id || payload?.data?.id || payload?.id || payload?.reference || nanoid(16));
   const existingEvent = await prisma.webhookEvent.findUnique({ where: { eventId } });
   if (existingEvent?.processedAt) return res.json({ success: true, received: true, duplicate: true, provider });

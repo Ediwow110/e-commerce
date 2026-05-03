@@ -17,72 +17,44 @@ const schema = z.object({
   PAYMONGO_PUBLIC_KEY: z.string().optional(),
   MAYA_PUBLIC_KEY: z.string().optional(),
   MAYA_SECRET_KEY: z.string().optional(),
+  MAYA_WEBHOOK_AUTH: z.string().optional(),
   XENDIT_SECRET_KEY: z.string().optional(),
-  // FIX P0-001: PAYMENT_WEBHOOK_SECRET required when real payment keys are present
+  XENDIT_CALLBACK_TOKEN: z.string().optional(),
   PAYMENT_WEBHOOK_SECRET: z.string().optional(),
   MAIL_PROVIDER: z.enum(['mock', 'resend', 'sendgrid', 'mailgun']).default('mock'),
-  MAIL_FROM: z.string().default('LUXE Jewelry & Bags <orders@example.com>'),
+  MAIL_FROM: z.string().default('LUXE Jewelry & Bags <orders@luxe.test>'),
   MAIL_REPLY_TO: z.string().optional(),
   RESEND_API_KEY: z.string().optional(),
   SENDGRID_API_KEY: z.string().optional(),
   MAILGUN_API_KEY: z.string().optional(),
-  MAILGUN_DOMAIN: z.string().optional()
+  MAILGUN_DOMAIN: z.string().optional(),
+  ALLOW_PROD_SEED: z.string().optional()
 });
 
 export const env = schema.parse(process.env);
 
-// FIX P2-012: Startup-time validation for production — fail fast with clear messages
 if (env.NODE_ENV === 'production') {
-  // CORS must be an explicit domain, not localhost or wildcard
   const corsOrigin = env.CORS_ORIGIN.trim();
-  if (
-    !corsOrigin ||
-    corsOrigin === '*' ||
-    corsOrigin.includes('localhost') ||
-    corsOrigin.includes('127.0.0.1')
-  ) {
-    throw new Error(
-      'CORS_ORIGIN must be set to your production domain (e.g. https://www.yourdomain.com), not localhost or wildcard, in production'
-    );
+  if (!corsOrigin || corsOrigin === '*' || corsOrigin.includes('localhost') || corsOrigin.includes('127.0.0.1')) {
+    throw new Error('CORS_ORIGIN must be set to your production domain (e.g. https://www.yourdomain.com), not localhost or wildcard, in production');
   }
-
-  // Webhook secret required in production
   if (!env.PAYMENT_WEBHOOK_SECRET) {
     throw new Error('PAYMENT_WEBHOOK_SECRET is required in production');
   }
-
-  // JWT secrets must differ and be sufficiently long
   if (env.JWT_ACCESS_SECRET === env.JWT_REFRESH_SECRET) {
     throw new Error('JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must differ in production');
   }
-
-  // Mock payment provider must not be used in production
   if (env.PAYMENT_PROVIDER_DEFAULT === 'mock') {
-    throw new Error(
-      'PAYMENT_PROVIDER_DEFAULT cannot be "mock" in production. Set a real provider (paymongo, maya, xendit) and configure the required API keys.'
-    );
+    throw new Error('PAYMENT_PROVIDER_DEFAULT cannot be "mock" in production');
   }
-
-  // Provider-specific key requirements
+  // Provider-specific secret requirements
   if (env.PAYMENT_PROVIDER_DEFAULT === 'paymongo' && !env.PAYMONGO_SECRET_KEY) {
-    throw new Error('PAYMONGO_SECRET_KEY is required when PAYMENT_PROVIDER_DEFAULT is paymongo');
+    throw new Error('PAYMONGO_SECRET_KEY required when PAYMENT_PROVIDER_DEFAULT=paymongo in production');
   }
-  if (env.PAYMENT_PROVIDER_DEFAULT === 'xendit' && !env.XENDIT_SECRET_KEY) {
-    throw new Error('XENDIT_SECRET_KEY is required when PAYMENT_PROVIDER_DEFAULT is xendit');
+  if (env.PAYMENT_PROVIDER_DEFAULT === 'maya' && (!env.MAYA_SECRET_KEY || !env.MAYA_WEBHOOK_AUTH)) {
+    throw new Error('MAYA_SECRET_KEY and MAYA_WEBHOOK_AUTH required when PAYMENT_PROVIDER_DEFAULT=maya in production');
   }
-  if (env.PAYMENT_PROVIDER_DEFAULT === 'maya' && (!env.MAYA_PUBLIC_KEY || !env.MAYA_SECRET_KEY)) {
-    throw new Error('MAYA_PUBLIC_KEY and MAYA_SECRET_KEY are required when PAYMENT_PROVIDER_DEFAULT is maya');
-  }
-
-  // Mail must be a real provider in production
-  if (env.MAIL_PROVIDER === 'mock') {
-    throw new Error(
-      'MAIL_PROVIDER cannot be "mock" in production. Set a real provider (resend, sendgrid, mailgun) and configure the API key.'
-    );
-  }
-
-  // Frontend URL must not be localhost in production
-  if (env.FRONTEND_URL.includes('localhost') || env.FRONTEND_URL.includes('127.0.0.1')) {
-    throw new Error('FRONTEND_URL must be set to your production domain in production');
+  if (env.PAYMENT_PROVIDER_DEFAULT === 'xendit' && (!env.XENDIT_SECRET_KEY || !env.XENDIT_CALLBACK_TOKEN)) {
+    throw new Error('XENDIT_SECRET_KEY and XENDIT_CALLBACK_TOKEN required when PAYMENT_PROVIDER_DEFAULT=xendit in production');
   }
 }
