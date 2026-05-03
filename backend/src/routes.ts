@@ -124,7 +124,10 @@ async function issueAuthResponse(res: Response, req: AuthedRequest, user: { id: 
     }
   });
   setRefreshCookie(res, response.refreshToken);
-  return { user: response.user, accessToken: response.accessToken };
+  // Return refreshToken in body too — SPA / mobile clients that don't use
+  // cookie-based sessions need it. Browser web clients can safely ignore it
+  // because the same value is also set as an HttpOnly cookie.
+  return { user: response.user, accessToken: response.accessToken, refreshToken: response.refreshToken };
 }
 
 async function authenticateWithRole(email: string, password: string, allowedRoles: string[], req?: AuthedRequest) {
