@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import { OAuth2Client } from 'google-auth-library';
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { prisma } from './prisma.js';
@@ -11,6 +12,9 @@ import { validate } from './validate.js';
 import { adminInvitationTemplate, orderConfirmationTemplate, orderReceiptTemplate, passwordResetTemplate, sendMail } from './mail.service.js';
 import { env } from './env.js';
 import { createPaymentCheckout, verifyProviderWebhookSignature } from './payment.service.js';
+import { assertOrderTransition, canWebhookMarkPaid } from './orderState.js';
+import { TWO_FA_REQUIRED_ROLES, assertTwoFactorEnrolled, buildOtpauthUrl, consumeBackupCode, generateBackupCodes, generateSecret, hashBackupCodes, verifyTotp } from './twoFactor.js';
+import { logger } from './logger.js';
 
 export const router = Router();
 const googleClient = new OAuth2Client(env.GOOGLE_CLIENT_ID);
@@ -123,12 +127,57 @@ async function issueAuthResponse(res: Response, req: AuthedRequest, user: { id: 
   return { user: response.user, accessToken: response.accessToken };
 }
 
-async function authenticateWithRole(email: string, password: string, allowedRoles: string[]) {
+async function authenticateWithRole(email: string, password: string, allowedRoles: string[], req?: AuthedRequest) {
   const user = await prisma.user.findUnique({ where: { email } });
-  if (!user || !(await comparePassword(password, user.passwordHash)) || !allowedRoles.includes(user.role)) {
+  // Generic invalid-credentials response — do NOT distinguish "no such user" from "wrong password"
+  // (prevents user enumeration). Lockout uses a constant-time-ish flow regardless.
+  if (!user || !allowedRoles.includes(user.role)) {
     throw new ApiError(401, 'Invalid credentials');
   }
+
+  // Lockout check
+  if (user.lockedUntil && user.lockedUntil > new Date()) {
+    const remaining = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60000);
+    throw new ApiError(429, `Account temporarily locked due to too many failed attempts. Try again in ${remaining} minute(s).`);
+  }
+
+  const passwordOk = await comparePassword(password, user.passwordHash);
+  if (!passwordOk) {
+    const failed = user.failedLoginCount + 1;
+    const shouldLock = failed >= env.LOGIN_LOCKOUT_THRESHOLD;
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        failedLoginCount: shouldLock ? 0 : failed,
+        lockedUntil: shouldLock ? new Date(Date.now() + env.LOGIN_LOCKOUT_DURATION_MINUTES * 60_000) : user.lockedUntil
+      }
+    });
+    if (shouldLock) {
+      await prisma.auditLog.create({
+        data: {
+          actorId: user.id,
+          actorEmail: user.email,
+          actorRole: user.role,
+          action: 'LOGIN_LOCKED',
+          resource: '/auth/login',
+          ipAddress: req?.ip,
+          userAgent: req?.get('user-agent'),
+          metadata: { thresholdReached: env.LOGIN_LOCKOUT_THRESHOLD, lockoutMinutes: env.LOGIN_LOCKOUT_DURATION_MINUTES } as never
+        }
+      }).catch((err) => logger.error({ err }, 'Failed to write LOGIN_LOCKED audit log'));
+    }
+    throw new ApiError(401, 'Invalid credentials');
+  }
+
   if (!user.isActive) throw new ApiError(403, 'Account disabled');
+
+  // Reset lockout counters on successful credential check
+  if (user.failedLoginCount > 0 || user.lockedUntil) {
+    await prisma.user.update({ where: { id: user.id }, data: { failedLoginCount: 0, lockedUntil: null, lastLoginAt: new Date() } });
+  } else {
+    await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+  }
+
   return user;
 }
 
@@ -166,12 +215,46 @@ router.post('/auth/register', authLimiter, validate(registerSchema), asyncHandle
 }));
 
 router.post('/auth/customer/login', authLimiter, validate(loginSchema), asyncHandler(async (req: AuthedRequest, res: Response) => {
-  const user = await authenticateWithRole(req.body.email, req.body.password, ['CUSTOMER']);
+  const user = await authenticateWithRole(req.body.email, req.body.password, ['CUSTOMER'], req);
   res.json({ success: true, data: await issueAuthResponse(res, req, user) });
 }));
 
 router.post('/auth/admin/login', authLimiter, validate(loginSchema), asyncHandler(async (req: AuthedRequest, res: Response) => {
-  const user = await authenticateWithRole(req.body.email, req.body.password, ADMIN_ROLES);
+  const user = await authenticateWithRole(req.body.email, req.body.password, ADMIN_ROLES, req);
+  // 2FA gate for admin: if user has 2FA enabled, return a short-lived ticket instead of full session.
+  if (user.twoFactorEnabled) {
+    const ticket = signAccessToken({ id: user.id, email: user.email, role: user.role, scope: '2fa-pending' });
+    return res.json({ success: true, data: { twoFactorRequired: true, ticket } });
+  }
+  // If policy enforces 2FA for sensitive roles and they have not enrolled, block login.
+  if (env.ENFORCE_ADMIN_2FA === 'true' && TWO_FA_REQUIRED_ROLES.has(user.role)) {
+    assertTwoFactorEnrolled(user.role, user);
+  }
+  await prisma.auditLog.create({ data: { actorId: user.id, actorEmail: user.email, actorRole: user.role, action: 'ADMIN_LOGIN', resource: '/auth/admin/login', ipAddress: req.ip, userAgent: req.get('user-agent') } }).catch((err) => logger.error({ err }, 'audit ADMIN_LOGIN failed'));
+  res.json({ success: true, data: await issueAuthResponse(res, req, user) });
+}));
+
+const twoFaVerifyLoginSchema = z.object({ body: z.object({ ticket: z.string().min(20), code: z.string().min(6).max(20) }).strict() });
+router.post('/auth/admin/2fa/login', authLimiter, validate(twoFaVerifyLoginSchema), asyncHandler(async (req: AuthedRequest, res: Response) => {
+  let payload: { id: string; email: string; role: string; scope?: string };
+  try {
+    payload = jwt.verify(req.body.ticket, env.JWT_ACCESS_SECRET) as never;
+  } catch {
+    throw new ApiError(401, 'Invalid or expired 2FA ticket');
+  }
+  if (payload.scope !== '2fa-pending') throw new ApiError(401, 'Invalid 2FA ticket');
+  const user = await prisma.user.findUnique({ where: { id: payload.id } });
+  if (!user || !user.isActive || !user.twoFactorEnabled || !user.twoFactorSecret) throw new ApiError(401, 'Invalid 2FA state');
+
+  const code = req.body.code.replace(/[\s-]/g, '');
+  const totpOk = code.length === 6 && verifyTotp(user.twoFactorSecret, code);
+  const backupOk = !totpOk && code.length >= 8 && await consumeBackupCode(user.id, req.body.code);
+  if (!totpOk && !backupOk) {
+    await prisma.auditLog.create({ data: { actorId: user.id, actorEmail: user.email, actorRole: user.role, action: '2FA_FAIL', resource: '/auth/admin/2fa/login', ipAddress: req.ip, userAgent: req.get('user-agent') } }).catch(() => undefined);
+    throw new ApiError(401, 'Invalid 2FA code');
+  }
+  await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
+  await prisma.auditLog.create({ data: { actorId: user.id, actorEmail: user.email, actorRole: user.role, action: backupOk ? '2FA_BACKUP_USED' : 'ADMIN_LOGIN', resource: '/auth/admin/2fa/login', ipAddress: req.ip, userAgent: req.get('user-agent') } }).catch(() => undefined);
   res.json({ success: true, data: await issueAuthResponse(res, req, user) });
 }));
 
@@ -179,13 +262,39 @@ router.post('/auth/refresh', authLimiter, validate(refreshSchema), asyncHandler(
   const refreshToken = getRefreshTokenFromRequest(req);
   if (!refreshToken) throw new ApiError(401, 'Refresh token required');
   const tokenHash = hashToken(refreshToken);
-  const payload = verifyRefreshToken(refreshToken);
+  let payload: { id: string };
+  try { payload = verifyRefreshToken(refreshToken); }
+  catch { throw new ApiError(401, 'Invalid refresh session'); }
   const session = await prisma.refreshSession.findUnique({ where: { tokenHash } });
-  if (!session || session.revokedAt || session.expiresAt <= new Date()) throw new ApiError(401, 'Invalid refresh session');
+
+  // FIX (P0 auth): Reuse-detection. A presented refresh token whose hash exists
+  // but is already revoked is treated as a stolen-token replay — we revoke ALL
+  // active sessions for that user and write an audit log. This converts the
+  // common "stolen refresh token" attack into a forced re-auth event.
+  if (session && session.revokedAt) {
+    await prisma.refreshSession.updateMany({ where: { userId: session.userId, revokedAt: null }, data: { revokedAt: new Date() } });
+    await prisma.auditLog.create({
+      data: {
+        actorId: session.userId,
+        actorEmail: 'system',
+        actorRole: 'SYSTEM',
+        action: 'REFRESH_REUSE_DETECTED',
+        resource: '/auth/refresh',
+        resourceId: session.id,
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+        metadata: { allSessionsRevoked: true } as never
+      }
+    }).catch((err) => logger.error({ err }, 'audit REFRESH_REUSE_DETECTED failed'));
+    clearRefreshCookie(res);
+    throw new ApiError(401, 'Refresh token reuse detected; all sessions revoked');
+  }
+
+  if (!session || session.expiresAt <= new Date()) throw new ApiError(401, 'Invalid refresh session');
   const user = await prisma.user.findUnique({ where: { id: payload.id }, select: { id: true, name: true, email: true, role: true, avatarUrl: true, isActive: true } });
   if (!user || !user.isActive) throw new ApiError(401, 'Invalid refresh session');
   await prisma.refreshSession.update({ where: { tokenHash }, data: { revokedAt: new Date() } });
-  res.json({ success: true, data: await issueAuthResponse(res, req, user) });
+  res.json({ success: true, data: await issueAuthResponse(res, req, user as never) });
 }));
 
 router.post('/auth/logout', validate(refreshSchema), asyncHandler(async (req: Request & { cookies?: Record<string, string>; body?: { refreshToken?: string } }, res: Response) => {
@@ -256,13 +365,55 @@ router.post('/auth/reset-password', authLimiter, validate(resetPasswordSchema), 
     throw new ApiError(400, 'Invalid or expired reset token');
   }
   await prisma.$transaction(async (tx) => {
-    await tx.user.update({ where: { id: resetToken.userId }, data: { passwordHash: await hashPassword(req.body.password), authProvider: 'credentials' } });
+    await tx.user.update({ where: { id: resetToken.userId }, data: { passwordHash: await hashPassword(req.body.password), authProvider: 'credentials', failedLoginCount: 0, lockedUntil: null } });
     await tx.passwordResetToken.update({ where: { tokenHash }, data: { usedAt: new Date() } });
     await tx.refreshSession.updateMany({ where: { userId: resetToken.userId, revokedAt: null }, data: { revokedAt: new Date() } });
+    await tx.auditLog.create({ data: { actorId: resetToken.userId, actorEmail: resetToken.user.email, actorRole: resetToken.user.role, action: 'PASSWORD_RESET', resource: '/auth/reset-password', ipAddress: req.ip, userAgent: req.get('user-agent'), metadata: { allSessionsRevoked: true } as never } });
   });
   clearRefreshCookie(res);
   res.json({ success: true, data: { reset: true } });
 }));
+
+// ─── 2FA enrolment (admin) ────────────────────────────────────────────────────
+const twoFaEnableSchema = z.object({ body: z.object({ code: z.string().min(6).max(10) }).strict() });
+router.post('/auth/2fa/setup', requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
+  if (!ADMIN_ROLES.includes(user.role)) throw new ApiError(403, '2FA setup is only available for staff accounts');
+  const secret = generateSecret();
+  const backupCodes = generateBackupCodes();
+  await prisma.user.update({ where: { id: user.id }, data: { twoFactorSecret: secret, twoFactorEnabled: false } });
+  await hashBackupCodes(user.id, backupCodes);
+  res.json({
+    success: true,
+    data: {
+      otpauthUrl: buildOtpauthUrl(secret, user.email),
+      secret, // shown once for manual entry; client should clear from memory after QR scan
+      backupCodes
+    }
+  });
+}));
+
+router.post('/auth/2fa/enable', requireAuth, validate(twoFaEnableSchema), asyncHandler(async (req: AuthedRequest, res) => {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
+  if (!user.twoFactorSecret) throw new ApiError(422, 'No 2FA secret pending — call /auth/2fa/setup first');
+  if (!verifyTotp(user.twoFactorSecret, req.body.code)) throw new ApiError(401, 'Invalid 2FA code');
+  await prisma.user.update({ where: { id: user.id }, data: { twoFactorEnabled: true, twoFactorEnrolledAt: new Date() } });
+  await prisma.auditLog.create({ data: { actorId: user.id, actorEmail: user.email, actorRole: user.role, action: '2FA_ENABLED', resource: '/auth/2fa/enable', ipAddress: req.ip, userAgent: req.get('user-agent') } }).catch(() => undefined);
+  res.json({ success: true, data: { twoFactorEnabled: true } });
+}));
+
+router.post('/auth/2fa/disable', requireAuth, validate(twoFaEnableSchema), asyncHandler(async (req: AuthedRequest, res) => {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
+  if (!user.twoFactorEnabled || !user.twoFactorSecret) throw new ApiError(422, '2FA is not enabled');
+  if (!verifyTotp(user.twoFactorSecret, req.body.code)) throw new ApiError(401, 'Invalid 2FA code');
+  await prisma.$transaction([
+    prisma.user.update({ where: { id: user.id }, data: { twoFactorEnabled: false, twoFactorSecret: null, twoFactorEnrolledAt: null } }),
+    prisma.twoFactorBackupCode.deleteMany({ where: { userId: user.id } })
+  ]);
+  await prisma.auditLog.create({ data: { actorId: user.id, actorEmail: user.email, actorRole: user.role, action: '2FA_DISABLED', resource: '/auth/2fa/disable', ipAddress: req.ip, userAgent: req.get('user-agent') } }).catch(() => undefined);
+  res.json({ success: true, data: { twoFactorEnabled: false } });
+}));
+
 
 router.get('/auth/invite/:token', authLimiter, validate(inviteTokenSchema), asyncHandler(async (req: Request, res: Response) => {
   const tokenHash = hashToken(getStringParam(req.params.token));
@@ -475,6 +626,9 @@ router.post('/orders', requireAuth, requirePermission('checkout:create'), valida
     const total = Math.max(0, subtotal + shippingFee - discountTotal);
     const orderNumber = `LX-${new Date().getFullYear()}-${nanoid(8).toUpperCase()}`;
     const addressJson = shippingMethod === 'store_pickup' ? { type: 'STORE_PICKUP' } : req.body.deliveryAddress;
+    // FIX (Phase 5): every new order has a payment expiry. The expire-orders cron
+    // restores reserved stock and marks the order EXPIRED if not paid in time.
+    const paymentExpiresAt = new Date(Date.now() + env.ORDER_PAYMENT_EXPIRY_MINUTES * 60_000);
 
     const created = await tx.order.create({
       data: {
@@ -486,6 +640,8 @@ router.post('/orders', requireAuth, requirePermission('checkout:create'), valida
         total,
         promoCodeId: promoRecord?.id,
         customerNote: req.body.customerNote,
+        status: 'PENDING_PAYMENT',
+        paymentExpiresAt,
         shipment: { create: { method: shippingMethod, addressJson } },
         items: {
           create: cart.map((item) => ({
@@ -523,9 +679,23 @@ router.post('/orders', requireAuth, requirePermission('checkout:create'), valida
 
     await tx.cartItem.deleteMany({ where: { userId } });
 
-    // Track promo code usage inside the same transaction
+    // FIX (Phase 4): Atomic promo usage increment — only succeeds if the row's
+    // current usedCount is still below usageLimit. Two concurrent checkouts
+    // racing past the pre-check will see one updateMany return count===0 and
+    // abort the loser's transaction. usageLimit=null means unlimited.
     if (promoRecord) {
-      await tx.promoCode.update({ where: { id: promoRecord.id }, data: { usedCount: { increment: 1 } } });
+      const promoUpdated = await tx.promoCode.updateMany({
+        where: {
+          id: promoRecord.id,
+          isActive: true,
+          OR: [
+            { usageLimit: null },
+            { usedCount: { lt: promoRecord.usageLimit ?? Number.MAX_SAFE_INTEGER } }
+          ]
+        },
+        data: { usedCount: { increment: 1 } }
+      });
+      if (promoUpdated.count === 0) throw new ApiError(422, 'Promo code has reached its usage limit');
       await tx.promoRedemption.create({ data: { userId, promoCodeId: promoRecord.id, orderId: created.id } });
     }
 
@@ -609,24 +779,11 @@ router.get('/admin/orders', requireAuth, requireRole('ADMIN', 'STAFF'), asyncHan
   ]);
   res.json({ success: true, ...paginatedResponse(data, total, page, limit) });
 }));
-const ORDER_STATUS_TRANSITIONS: Record<string, string[]> = {
-  PENDING: ['CONFIRMED', 'CANCELLED'],
-  CONFIRMED: ['PREPARING', 'CANCELLED'],
-  PREPARING: ['TO_SHIP', 'CANCELLED'],
-  TO_SHIP: ['SHIPPED', 'CANCELLED'],
-  SHIPPED: ['DELIVERED'],
-  DELIVERED: ['REFUNDED'],
-  CANCELLED: [],
-  REFUNDED: []
-};
-
 router.patch('/admin/orders/:id/status', requireAuth, requireRole('ADMIN', 'STAFF'), validate(orderStatusSchema), asyncHandler(async (req, res) => {
   const id = getStringParam(req.params.id);
   const current = await prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true } });
-  const allowed = ORDER_STATUS_TRANSITIONS[current.status] ?? [];
-  if (!allowed.includes(req.body.status)) {
-    throw new ApiError(422, `Cannot transition order from ${current.status} to ${req.body.status}. Allowed: ${allowed.join(', ') || 'none'}`);
-  }
+  // Phase 6: shared state machine — see backend/src/orderState.ts
+  assertOrderTransition(current.status, req.body.status);
   const order = await prisma.order.update({ where: { id }, data: { status: req.body.status } });
   res.json({ success: true, data: order });
 }));
@@ -682,15 +839,52 @@ router.post('/payments/webhook/:provider', asyncHandler(async (req, res) => {
   if (reference && (paidEventTypes[provider] || []).includes(eventType)) {
     const payment = await prisma.payment.findFirst({ where: { OR: [{ reference }, { order: { orderNumber: reference } }] }, include: { order: true } });
     if (payment) {
+      // Phase 2/6: validate amount + currency BEFORE state changes; refuse to pay an order
+      // that has been cancelled, refunded, or expired. Late payments for expired orders
+      // route the Payment to MANUAL_REVIEW (operator decision).
       const amount = Number(payload?.data?.attributes?.amount ?? payload?.amount ?? payment.amount);
       const currency = String(payload?.data?.attributes?.currency ?? payload?.currency ?? 'PHP').toUpperCase();
-      if (amount && amount !== Number(payment.amount) && amount !== Math.round(Number(payment.amount) * 100)) throw new ApiError(422, 'Webhook amount mismatch');
-      if (currency !== 'PHP') throw new ApiError(422, 'Webhook currency mismatch');
-      await prisma.payment.update({ where: { id: payment.id }, data: { status: 'PAID', paidAt: new Date(), metadata: redactSensitiveMetadata(payload) as any } });
-      await prisma.order.update({ where: { id: payment.orderId }, data: { paymentStatus: 'PAID', status: 'CONFIRMED' } });
-      await prisma.webhookEvent.update({ where: { eventId }, data: { processedAt: new Date() } });
+      if (amount && amount !== Number(payment.amount) && amount !== Math.round(Number(payment.amount) * 100)) {
+        await prisma.webhookEvent.update({ where: { eventId }, data: { processedAt: new Date() } });
+        throw new ApiError(422, 'Webhook amount mismatch');
+      }
+      if (currency !== 'PHP') {
+        await prisma.webhookEvent.update({ where: { eventId }, data: { processedAt: new Date() } });
+        throw new ApiError(422, 'Webhook currency mismatch');
+      }
+
+      if (!canWebhookMarkPaid(payment.order.status, payment.order.paymentStatus)) {
+        // Late payment for an expired/cancelled/already-paid order → flag for manual review.
+        if (payment.order.status === 'EXPIRED' || payment.order.paymentStatus === 'EXPIRED') {
+          await prisma.payment.update({
+            where: { id: payment.id },
+            data: { status: 'MANUAL_REVIEW', metadata: redactSensitiveMetadata(payload) as never }
+          });
+          await prisma.auditLog.create({
+            data: {
+              actorEmail: 'system',
+              actorRole: 'SYSTEM',
+              action: 'PAYMENT_LATE_FOR_EXPIRED_ORDER',
+              resource: '/payments/webhook',
+              resourceId: payment.id,
+              metadata: { orderId: payment.orderId, provider, reference } as never
+            }
+          }).catch(() => undefined);
+        }
+        await prisma.webhookEvent.update({ where: { eventId }, data: { processedAt: new Date() } });
+        return res.json({ success: true, received: true, provider, ignored: 'order-not-payable', orderStatus: payment.order.status });
+      }
+
+      await prisma.$transaction([
+        prisma.payment.update({ where: { id: payment.id }, data: { status: 'PAID', paidAt: new Date(), metadata: redactSensitiveMetadata(payload) as never } }),
+        prisma.order.update({ where: { id: payment.orderId }, data: { paymentStatus: 'PAID', status: 'CONFIRMED' } }),
+        prisma.webhookEvent.update({ where: { eventId }, data: { processedAt: new Date() } })
+      ]);
+      return res.json({ success: true, received: true, provider, marked: 'PAID' });
     }
   }
+  // Mark event processed even when no matching payment, to prevent retry storms.
+  await prisma.webhookEvent.update({ where: { eventId }, data: { processedAt: new Date() } }).catch(() => undefined);
   res.json({ success: true, received: true, provider });
 }));
 

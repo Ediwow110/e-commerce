@@ -21,12 +21,15 @@ enum Role {
 
 enum OrderStatus {
   PENDING
+  PENDING_PAYMENT
   CONFIRMED
   PREPARING
   TO_SHIP
   SHIPPED
   DELIVERED
   CANCELLED
+  EXPIRED
+  PAYMENT_FAILED
   REFUNDED
 }
 
@@ -35,6 +38,9 @@ enum PaymentStatus {
   PENDING
   PAID
   FAILED
+  CANCELLED
+  EXPIRED
+  MANUAL_REVIEW
   REFUNDED
 }
 
@@ -57,6 +63,12 @@ model User {
   phone         String?
   avatarUrl     String?
   isActive      Boolean  @default(true)
+  twoFactorEnabled    Boolean   @default(false)
+  twoFactorSecret     String?
+  twoFactorEnrolledAt DateTime?
+  failedLoginCount    Int       @default(0)
+  lockedUntil         DateTime?
+  lastLoginAt         DateTime?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   addresses     Address[]
@@ -66,6 +78,7 @@ model User {
   reviews       Review[]
   passwordResetTokens PasswordResetToken[]
   refreshSessions RefreshSession[]
+  twoFactorBackupCodes TwoFactorBackupCode[]
   invitationsSent  AdminInvitation[] @relation("InvitedBy")
   invitation       AdminInvitation? @relation("InvitedUser")
   promoRedemptions PromoRedemption[]
@@ -73,6 +86,18 @@ model User {
   @@index([role])
   @@index([isActive])
   @@index([createdAt])
+  @@index([lockedUntil])
+}
+
+model TwoFactorBackupCode {
+  id        String    @id @default(cuid())
+  userId    String
+  codeHash  String    @unique
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model AdminInvitation {
@@ -268,29 +293,33 @@ model PromoCode {
 }
 
 model Order {
-  id            String        @id @default(cuid())
-  orderNumber   String        @unique
-  userId        String
-  promoCodeId   String?
-  status        OrderStatus   @default(PENDING)
-  paymentStatus PaymentStatus @default(UNPAID)
-  subtotal      Decimal       @db.Decimal(12,2)
-  discountTotal Decimal       @default(0) @db.Decimal(12,2)
-  shippingFee   Decimal       @default(0) @db.Decimal(12,2)
-  total         Decimal       @db.Decimal(12,2)
-  customerNote  String?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  user          User          @relation(fields: [userId], references: [id])
-  promoCode     PromoCode?    @relation(fields: [promoCodeId], references: [id])
-  items         OrderItem[]
-  payment       Payment?
-  shipment      Shipment?
+  id              String        @id @default(cuid())
+  orderNumber     String        @unique
+  userId          String
+  promoCodeId     String?
+  status          OrderStatus   @default(PENDING)
+  paymentStatus   PaymentStatus @default(UNPAID)
+  subtotal        Decimal       @db.Decimal(12,2)
+  discountTotal   Decimal       @default(0) @db.Decimal(12,2)
+  shippingFee     Decimal       @default(0) @db.Decimal(12,2)
+  total           Decimal       @db.Decimal(12,2)
+  customerNote    String?
+  paymentExpiresAt DateTime?
+  stockRestoredAt  DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  user            User          @relation(fields: [userId], references: [id])
+  promoCode       PromoCode?    @relation(fields: [promoCodeId], references: [id])
+  items           OrderItem[]
+  payment         Payment?
+  shipment        Shipment?
 
   @@index([userId])
   @@index([userId, createdAt])
   @@index([status])
   @@index([paymentStatus])
+  @@index([status, paymentStatus])
+  @@index([paymentExpiresAt])
   @@index([createdAt])
 }
 
@@ -328,6 +357,8 @@ model Payment {
 
   @@index([status])
   @@index([createdAt])
+  @@index([reference])
+  @@index([provider, reference])
 }
 
 model Shipment {
@@ -392,6 +423,7 @@ model AuditLog {
   @@index([actorId])
   @@index([resource])
   @@index([createdAt])
+  @@index([action, createdAt])
 }
 
 model WebhookEvent {
@@ -403,6 +435,7 @@ model WebhookEvent {
   payload     Json
   createdAt   DateTime @default(now())
 
+  @@unique([provider, eventId])
   @@index([provider])
   @@index([createdAt])
   @@index([processedAt])
