@@ -60,5 +60,5 @@ export async function seedMinimal() {
   return { category, product, variant };
 }
 
-beforeAll(async () => { await resetDb(); });
-afterAll(async () => { await prisma.$disconnect(); });
+beforeAll(async () => { if (HAS_REAL_DB) await resetDb(); });
+afterAll(async () => { if (HAS_REAL_DB) await prisma.$disconnect(); });
