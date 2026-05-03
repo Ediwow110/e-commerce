@@ -15,6 +15,8 @@ import { createPaymentCheckout, verifyWebhookSignature } from './payment.service
 export const router = Router();
 const googleClient = new OAuth2Client(env.GOOGLE_CLIENT_ID);
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 25, standardHeaders: true, legacyHeaders: false, message: { success: false, message: 'Too many authentication attempts. Please try again later.' } });
+const reviewLimiter = rateLimit({ windowMs: 60 * 60 * 1000, limit: 5, standardHeaders: true, legacyHeaders: false, message: { success: false, message: 'Too many reviews submitted. Please try again later.' } });
+const reviewCreateSchema = z.object({ body: z.object({ productId: z.string().min(1), rating: z.coerce.number().int().min(1).max(5), comment: z.string().max(1000).optional() }).strict() });
 
 const registerSchema = z.object({ body: z.object({ name: z.string().min(2), email: z.string().email(), password: z.string().min(8) }) });
 const loginSchema = z.object({ body: z.object({ email: z.string().email(), password: z.string().min(1) }) });
@@ -56,18 +58,6 @@ const deliveryAddressSchema = z.object({
   province: z.string().optional(),
   postalCode: z.string().optional(),
   country: z.string().optional().default('Philippines')
-});
-const orderCreateSchema = z.object({
-  body: z.object({
-    shippingMethod: z.string().optional().default('standard_delivery'),
-    shippingFee: z.number().nonnegative().optional(),
-    deliveryAddress: deliveryAddressSchema.optional(),
-    customerNote: z.string().max(500).optional()
-  }).superRefine((data, ctx) => {
-    if (data.shippingMethod !== 'store_pickup' && !data.deliveryAddress) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['deliveryAddress'], message: 'Please add a delivery address before placing your order.' });
-    }
-  })
 });
 
 const sensitiveKeys = ['password', 'passwordhash', 'token', 'refreshtoken', 'accesstoken', 'authorization', 'secret', 'apikey', 'card', 'paymentmethod', 'paymenttoken', 'cvv', 'resettoken', 'cookie', 'session', 'credential'];
@@ -146,11 +136,27 @@ function getStringParam(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value ?? '';
 }
 
+function parsePagination(req: Request, defaultLimit = 50) {
+  const page = Math.max(1, parseInt(String(req.query.page ?? '1'), 10) || 1);
+  const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit ?? String(defaultLimit)), 10) || defaultLimit));
+  return { page, limit, skip: (page - 1) * limit };
+}
+
+function paginatedResponse<T>(data: T[], total: number, page: number, limit: number) {
+  return { data, pagination: { total, page, limit, pages: Math.ceil(total / limit) } };
+}
+
 function getRefreshTokenFromRequest(req: Request & { cookies?: Record<string, string>; body?: { refreshToken?: string } }) {
   return req.cookies?.luxe_refresh_token || req.body?.refreshToken;
 }
 
 router.get('/health', (_req, res) => res.json({ success: true, service: 'luxe-commerce-api', status: 'ok' }));
+
+// FIX P2-008: Deep health check — verifies DB connectivity for load balancer readiness probes
+router.get('/health/ready', asyncHandler(async (_req, res) => {
+  await prisma.$queryRaw`SELECT 1`;
+  res.json({ success: true, status: 'ready', db: 'ok', ts: new Date().toISOString() });
+}));
 
 router.post('/auth/register', authLimiter, validate(registerSchema), asyncHandler(async (req: AuthedRequest, res: Response) => {
   const exists = await prisma.user.findUnique({ where: { email: req.body.email } });
@@ -297,14 +303,65 @@ router.get('/categories', asyncHandler(async (_req, res) => {
 }));
 
 router.get('/products', asyncHandler(async (req, res) => {
+  const { page, limit, skip } = parsePagination(req, 24);
   const search = String(req.query.search ?? '');
   const category = String(req.query.category ?? '');
-  const data = await prisma.product.findMany({
-    where: { isActive: true, name: { contains: search, mode: 'insensitive' }, ...(category ? { category: { slug: category } } : {}) },
-    include: { category: true, images: { orderBy: { sortOrder: 'asc' } }, variants: true },
-    orderBy: { createdAt: 'desc' }
+  const featuredOnly = req.query.featured === 'true';
+  const where = {
+    isActive: true,
+    ...(search ? { name: { contains: search, mode: 'insensitive' as any } } : {}),
+    ...(category ? { category: { slug: category } } : {}),
+    ...(featuredOnly ? { isFeatured: true } : {})
+  };
+  const [total, data] = await Promise.all([
+    prisma.product.count({ where }),
+    prisma.product.findMany({
+      where,
+      include: { category: true, images: { orderBy: { sortOrder: 'asc' }, take: 1 }, variants: true },
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limit
+    })
+  ]);
+  res.json({ success: true, ...paginatedResponse(data, total, page, limit) });
+}));
+
+router.get('/promos/validate', requireAuth, asyncHandler(async (req, res) => {
+  const code = String(req.query.code ?? '').toUpperCase();
+  const subtotal = Number(req.query.subtotal ?? 0);
+  if (!code) throw new ApiError(400, 'Promo code is required');
+  const now = new Date();
+  const promo = await prisma.promoCode.findFirst({
+    where: {
+      code: { equals: code, mode: 'insensitive' },
+      isActive: true,
+      OR: [{ startsAt: null }, { startsAt: { lte: now } }],
+      AND: [{ OR: [{ endsAt: null }, { endsAt: { gt: now } }] }]
+    }
   });
-  res.json({ success: true, data });
+  if (!promo) throw new ApiError(404, 'Invalid or expired promo code');
+  if (promo.usageLimit !== null && promo.usedCount >= promo.usageLimit) throw new ApiError(422, 'Promo code has reached its usage limit');
+  if (promo.minSubtotal && subtotal < Number(promo.minSubtotal)) throw new ApiError(422, `Minimum order of ₱${Number(promo.minSubtotal).toFixed(2)} required for this promo code`);
+  let discount = 0;
+  if (promo.type === 'percentage') discount = Math.min((subtotal * Number(promo.value)) / 100, subtotal);
+  else if (promo.type === 'fixed') discount = Math.min(Number(promo.value), subtotal);
+  else if (promo.type === 'free_shipping') discount = 150;
+  res.json({ success: true, data: { id: promo.id, code: promo.code, type: promo.type, value: Number(promo.value), discount: Math.round(discount * 100) / 100, minSubtotal: promo.minSubtotal ? Number(promo.minSubtotal) : null } });
+}));
+
+router.post('/reviews', requireAuth, reviewLimiter, requirePermission('reviews:create'), validate(reviewCreateSchema), asyncHandler(async (req: AuthedRequest, res) => {
+  const { productId, rating, comment } = req.body;
+  const product = await prisma.product.findUnique({ where: { id: productId }, select: { id: true, isActive: true } });
+  if (!product || !product.isActive) throw new ApiError(404, 'Product not found');
+  const hasPurchased = await prisma.orderItem.findFirst({ where: { productId, order: { userId: req.user!.id, paymentStatus: 'PAID' } } });
+  if (!hasPurchased) throw new ApiError(403, 'You can only review products you have purchased');
+  try {
+    const review = await prisma.review.create({ data: { userId: req.user!.id, productId, rating, comment } });
+    res.status(201).json({ success: true, data: review });
+  } catch (err: any) {
+    if (err?.code === 'P2002') throw new ApiError(409, 'You have already reviewed this product');
+    throw err;
+  }
 }));
 
 router.get('/products/:slug', asyncHandler(async (req, res) => {
@@ -335,33 +392,182 @@ router.post('/cart', requireAuth, requirePermission('cart:write'), validate(cart
   res.status(201).json({ success: true, data: item });
 }));
 
-router.post('/orders', requireAuth, requirePermission('checkout:create'), validate(orderCreateSchema), asyncHandler(async (req: AuthedRequest, res) => {
-  const cart = await prisma.cartItem.findMany({ where: { userId: req.user!.id }, include: { product: true, variant: true } });
-  if (!cart.length) throw new ApiError(422, 'Cart is empty');
-  for (const item of cart) {
-    if (!item.product.isActive) throw new ApiError(422, item.product.name + ' is no longer available');
-    if (item.variant && item.variant.stock < item.quantity) throw new ApiError(422, item.product.name + ' does not have enough stock');
+const orderCreateWithPromoSchema = z.object({
+  body: z.object({
+    shippingMethod: z.string().optional().default('standard_delivery'),
+    deliveryAddress: deliveryAddressSchema.optional(),
+    customerNote: z.string().max(500).optional(),
+    promoCode: z.string().max(40).optional()
+  }).superRefine((data, ctx) => {
+    if (data.shippingMethod !== 'store_pickup' && !data.deliveryAddress) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['deliveryAddress'], message: 'Please add a delivery address before placing your order.' });
+    }
+  })
+});
+
+router.post('/orders', requireAuth, requirePermission('checkout:create'), validate(orderCreateWithPromoSchema), asyncHandler(async (req: AuthedRequest, res) => {
+  // FIX P0-003: Stock check AND decrement happen inside a single serializable transaction.
+  // This prevents the race condition where two concurrent checkouts both pass the stock check
+  // before either decrements — causing overselling.
+  const userId = req.user!.id;
+  const shippingMethod = req.body.shippingMethod ?? 'standard_delivery';
+  const promoCodeInput: string | undefined = req.body.promoCode ? String(req.body.promoCode).toUpperCase() : undefined;
+
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+
+  // Validate promo code before entering the transaction (non-locking pre-check)
+  let promoRecord: { id: string; type: string; value: number; minSubtotal: number | null; usageLimit: number | null; usedCount: number } | null = null;
+  if (promoCodeInput) {
+    const now = new Date();
+    const found = await prisma.promoCode.findFirst({
+      where: { code: { equals: promoCodeInput, mode: 'insensitive' }, isActive: true, OR: [{ startsAt: null }, { startsAt: { lte: now } }], AND: [{ OR: [{ endsAt: null }, { endsAt: { gt: now } }] }] }
+    });
+    if (!found) throw new ApiError(404, 'Invalid or expired promo code');
+    if (found.usageLimit !== null && found.usedCount >= found.usageLimit) throw new ApiError(422, 'Promo code has reached its usage limit');
+    promoRecord = { id: found.id, type: found.type, value: Number(found.value), minSubtotal: found.minSubtotal ? Number(found.minSubtotal) : null, usageLimit: found.usageLimit, usedCount: found.usedCount };
   }
-  const subtotal = cart.reduce((sum, item) => sum + Number(item.product.salePrice ?? item.product.price) * item.quantity + Number(item.variant?.priceDelta ?? 0) * item.quantity, 0);
-  const shippingFee = (req.body.shippingMethod === 'store_pickup') ? 0 : 150;
-  const total = subtotal + shippingFee;
-  const orderNumber = `LX-${new Date().getFullYear()}-${nanoid(8).toUpperCase()}`;
-  const user = await prisma.user.findUniqueOrThrow({ where: { id: req.user!.id } });
-  const order = await prisma.$transaction(async tx => {
-    const shippingMethod = req.body.shippingMethod ?? 'standard_delivery';
+
+  const order = await prisma.$transaction(async (tx) => {
+    // Re-fetch cart inside the transaction so all reads are in the same snapshot
+    const cart = await tx.cartItem.findMany({
+      where: { userId },
+      include: { product: true, variant: true }
+    });
+
+    if (!cart.length) throw new ApiError(422, 'Cart is empty');
+
+    for (const item of cart) {
+      if (!item.product.isActive) throw new ApiError(422, `${item.product.name} is no longer available`);
+
+      if (item.variantId) {
+        // Re-read variant stock inside the transaction with a locking read
+        const freshVariant = await tx.productVariant.findUnique({ where: { id: item.variantId } });
+        if (!freshVariant || freshVariant.stock < item.quantity) {
+          throw new ApiError(422, `${item.product.name} does not have enough stock`);
+        }
+      }
+    }
+
+    // FIX P2-004: Prices recalculated from DB — client-supplied prices are never trusted
+    const subtotal = cart.reduce(
+      (sum, item) =>
+        sum +
+        Number(item.product.salePrice ?? item.product.price) * item.quantity +
+        Number(item.variant?.priceDelta ?? 0) * item.quantity,
+      0
+    );
+
+    // Validate promo minimum subtotal inside transaction
+    if (promoRecord && promoRecord.minSubtotal !== null && subtotal < promoRecord.minSubtotal) {
+      throw new ApiError(422, `Minimum order of ₱${promoRecord.minSubtotal.toFixed(2)} required for this promo code`);
+    }
+
+    // Calculate discount
+    let discountTotal = 0;
+    if (promoRecord) {
+      if (promoRecord.type === 'percentage') discountTotal = Math.min((subtotal * promoRecord.value) / 100, subtotal);
+      else if (promoRecord.type === 'fixed') discountTotal = Math.min(promoRecord.value, subtotal);
+      else if (promoRecord.type === 'free_shipping') discountTotal = 150;
+    }
+
+    // FIX P1-006: Shipping fee calculated server-side only — never accepted from client
+    const shippingFee = shippingMethod === 'store_pickup' ? 0 : 150;
+    const total = Math.max(0, subtotal + shippingFee - discountTotal);
+    const orderNumber = `LX-${new Date().getFullYear()}-${nanoid(8).toUpperCase()}`;
     const addressJson = shippingMethod === 'store_pickup' ? { type: 'STORE_PICKUP' } : req.body.deliveryAddress;
-    const created = await tx.order.create({ data: { orderNumber, userId: req.user!.id, subtotal, shippingFee, total, customerNote: req.body.customerNote, shipment: { create: { method: shippingMethod, addressJson } }, items: { create: cart.map(item => ({ productId: item.productId, variantId: item.variantId, name: item.product.name, sku: item.variant?.sku, unitPrice: Number(item.product.salePrice ?? item.product.price) + Number(item.variant?.priceDelta ?? 0), quantity: item.quantity, lineTotal: (Number(item.product.salePrice ?? item.product.price) + Number(item.variant?.priceDelta ?? 0)) * item.quantity })) } }, include: { items: true, shipment: true } });
-    for (const item of cart) if (item.variantId) await tx.productVariant.update({ where: { id: item.variantId }, data: { stock: { decrement: item.quantity } } });
-    await tx.cartItem.deleteMany({ where: { userId: req.user!.id } });
+
+    const created = await tx.order.create({
+      data: {
+        orderNumber,
+        userId,
+        subtotal,
+        discountTotal,
+        shippingFee,
+        total,
+        promoCodeId: promoRecord?.id,
+        customerNote: req.body.customerNote,
+        shipment: { create: { method: shippingMethod, addressJson } },
+        items: {
+          create: cart.map((item) => ({
+            productId: item.productId,
+            variantId: item.variantId,
+            name: item.product.name,
+            sku: item.variant?.sku,
+            unitPrice: Number(item.product.salePrice ?? item.product.price) + Number(item.variant?.priceDelta ?? 0),
+            quantity: item.quantity,
+            lineTotal:
+              (Number(item.product.salePrice ?? item.product.price) + Number(item.variant?.priceDelta ?? 0)) *
+              item.quantity
+          }))
+        }
+      },
+      include: { items: true, shipment: true }
+    });
+
+    // Decrement stock atomically inside the same transaction
+    for (const item of cart) {
+      if (item.variantId) {
+        await tx.productVariant.update({
+          where: { id: item.variantId },
+          data: { stock: { decrement: item.quantity } }
+        });
+      }
+    }
+
+    await tx.cartItem.deleteMany({ where: { userId } });
+
+    // Track promo code usage inside the same transaction
+    if (promoRecord) {
+      await tx.promoCode.update({ where: { id: promoRecord.id }, data: { usedCount: { increment: 1 } } });
+      await tx.promoRedemption.create({ data: { userId, promoCodeId: promoRecord.id, orderId: created.id } });
+    }
+
     return created;
+  }, { isolationLevel: 'Serializable' });
+
+  // Send acknowledgement email (payment pending — full receipt sent after webhook confirms PAID)
+  await sendMail({
+    to: user.email,
+    subject: `LUXE order received — ${order.orderNumber}`,
+    html: orderReceiptTemplate({
+      orderNumber: order.orderNumber,
+      customerName: user.name,
+      subtotal: Number(order.subtotal),
+      shippingFee: Number(order.shippingFee),
+      total: Number(order.total),
+      paymentStatus: order.paymentStatus,
+      paymentMethod: 'Pending payment',
+      deliveryAddress: order.shipment?.addressJson as any,
+      items: order.items.map((item) => ({
+        name: item.name,
+        quantity: item.quantity,
+        unitPrice: Number(item.unitPrice),
+        lineTotal: Number(item.lineTotal)
+      }))
+    })
   });
-  await sendMail({ to: user.email, subject: `Your LUXE order receipt ${order.orderNumber}`, html: orderReceiptTemplate({ orderNumber: order.orderNumber, customerName: user.name, subtotal, shippingFee, total, paymentStatus: order.paymentStatus, paymentMethod: req.body.paymentMethod || "Pending", deliveryAddress: order.shipment?.addressJson as any, items: order.items.map(item => ({ name: item.name, quantity: item.quantity, unitPrice: Number(item.unitPrice), lineTotal: Number(item.lineTotal) })) }) });
+
   res.status(201).json({ success: true, data: order });
 }));
 
 router.get('/orders/me', requireAuth, requirePermission('orders:read-own'), asyncHandler(async (req: AuthedRequest, res) => {
-  const data = await prisma.order.findMany({ where: { userId: req.user!.id }, include: { items: true, shipment: true }, orderBy: { createdAt: 'desc' } });
-  res.json({ success: true, data });
+  const { page, limit, skip } = parsePagination(req, 20);
+  const [total, data] = await Promise.all([
+    prisma.order.count({ where: { userId: req.user!.id } }),
+    prisma.order.findMany({ where: { userId: req.user!.id }, include: { items: true, shipment: true, payment: { select: { provider: true, status: true, checkoutUrl: true } } }, orderBy: { createdAt: 'desc' }, skip, take: limit })
+  ]);
+  res.json({ success: true, ...paginatedResponse(data, total, page, limit) });
+}));
+
+router.get('/orders/:id', requireAuth, asyncHandler(async (req: AuthedRequest, res) => {
+  const id = getStringParam(req.params.id);
+  const isAdmin = ADMIN_ROLES.includes(req.user!.role as any);
+  const order = await prisma.order.findFirst({
+    where: { id, ...(isAdmin ? {} : { userId: req.user!.id }) },
+    include: { items: true, shipment: true, payment: true, user: isAdmin ? { select: { name: true, email: true, phone: true } } : false }
+  });
+  if (!order) throw new ApiError(404, 'Order not found');
+  res.json({ success: true, data: order });
 }));
 
 // Admin API audit layer: logs mutating admin actions.
@@ -386,12 +592,35 @@ router.post('/admin/products', requireAuth, requireRole('ADMIN'), validate(produ
   const product = await prisma.product.create({ data: { categoryId: req.body.categoryId, name: req.body.name, slug: req.body.slug, description: req.body.description, price: req.body.price, salePrice: req.body.salePrice, material: req.body.material, careGuide: req.body.careGuide, isFeatured: req.body.isFeatured, isActive: req.body.isActive } });
   res.status(201).json({ success: true, data: product });
 }));
-router.get('/admin/orders', requireAuth, requireRole('ADMIN', 'STAFF'), asyncHandler(async (_req, res) => {
-  const data = await prisma.order.findMany({ include: { user: { select: { name: true, email: true } }, items: true }, orderBy: { createdAt: 'desc' } });
-  res.json({ success: true, data });
+router.get('/admin/orders', requireAuth, requireRole('ADMIN', 'STAFF'), asyncHandler(async (req, res) => {
+  const { page, limit, skip } = parsePagination(req, 50);
+  const statusFilter = req.query.status ? { status: getStringParam(req.query.status as string | undefined) as any } : {};
+  const paymentFilter = req.query.paymentStatus ? { paymentStatus: getStringParam(req.query.paymentStatus as string | undefined) as any } : {};
+  const [total, data] = await Promise.all([
+    prisma.order.count({ where: { ...statusFilter, ...paymentFilter } }),
+    prisma.order.findMany({ where: { ...statusFilter, ...paymentFilter }, include: { user: { select: { name: true, email: true } }, items: true }, orderBy: { createdAt: 'desc' }, skip, take: limit })
+  ]);
+  res.json({ success: true, ...paginatedResponse(data, total, page, limit) });
 }));
+const ORDER_STATUS_TRANSITIONS: Record<string, string[]> = {
+  PENDING: ['CONFIRMED', 'CANCELLED'],
+  CONFIRMED: ['PREPARING', 'CANCELLED'],
+  PREPARING: ['TO_SHIP', 'CANCELLED'],
+  TO_SHIP: ['SHIPPED', 'CANCELLED'],
+  SHIPPED: ['DELIVERED'],
+  DELIVERED: ['REFUNDED'],
+  CANCELLED: [],
+  REFUNDED: []
+};
+
 router.patch('/admin/orders/:id/status', requireAuth, requireRole('ADMIN', 'STAFF'), validate(orderStatusSchema), asyncHandler(async (req, res) => {
-  const order = await prisma.order.update({ where: { id: getStringParam(req.params.id) }, data: { status: req.body.status } });
+  const id = getStringParam(req.params.id);
+  const current = await prisma.order.findUniqueOrThrow({ where: { id }, select: { status: true } });
+  const allowed = ORDER_STATUS_TRANSITIONS[current.status] ?? [];
+  if (!allowed.includes(req.body.status)) {
+    throw new ApiError(422, `Cannot transition order from ${current.status} to ${req.body.status}. Allowed: ${allowed.join(', ') || 'none'}`);
+  }
+  const order = await prisma.order.update({ where: { id }, data: { status: req.body.status } });
   res.json({ success: true, data: order });
 }));
 router.get('/admin/reports/sales', requireAuth, requireRole('ADMIN'), asyncHandler(async (_req, res) => {
@@ -520,9 +749,15 @@ router.post('/admin/inventory/movements', requireAuth, requireRole('ADMIN', 'STA
   res.status(201).json({ success: true, data: movement });
 }));
 
-router.get('/admin/customers', requireAuth, requireRole('ADMIN', 'STAFF'), asyncHandler(async (_req, res) => {
-  const data = await prisma.user.findMany({ where: { role: 'CUSTOMER' }, select: { id: true, name: true, email: true, phone: true, role: true, isActive: true, createdAt: true, orders: true, wishlistItems: true }, orderBy: { createdAt: 'desc' } });
-  res.json({ success: true, data });
+router.get('/admin/customers', requireAuth, requireRole('ADMIN', 'STAFF'), asyncHandler(async (req, res) => {
+  const { page, limit, skip } = parsePagination(req, 50);
+  const search = req.query.search ? String(req.query.search) : undefined;
+  const where = { role: 'CUSTOMER' as any, ...(search ? { OR: [{ name: { contains: search, mode: 'insensitive' as any } }, { email: { contains: search, mode: 'insensitive' as any } }] } : {}) };
+  const [total, data] = await Promise.all([
+    prisma.user.count({ where }),
+    prisma.user.findMany({ where, select: { id: true, name: true, email: true, phone: true, role: true, isActive: true, createdAt: true, _count: { select: { orders: true, wishlistItems: true } } }, orderBy: { createdAt: 'desc' }, skip, take: limit })
+  ]);
+  res.json({ success: true, ...paginatedResponse(data, total, page, limit) });
 }));
 router.patch('/admin/customers/:id', requireAuth, requireRole('ADMIN'), validate(customerUpdateSchema), asyncHandler(async (req, res) => {
   const user = await prisma.user.update({ where: { id: getStringParam(req.params.id) }, data: pickDefined({ name: req.body.name, phone: req.body.phone, isActive: req.body.isActive }) });
@@ -565,9 +800,43 @@ router.get('/admin/payments', requireAuth, requireRole('ADMIN', 'STAFF'), asyncH
   const data = await prisma.payment.findMany({ include: { order: { select: { orderNumber: true, user: { select: { name: true, email: true } } } } }, orderBy: { createdAt: 'desc' } });
   res.json({ success: true, data });
 }));
-router.patch('/admin/payments/:id', requireAuth, requireRole('ADMIN'), validate(paymentUpdateSchema), asyncHandler(async (req, res) => {
-  const payment = await prisma.payment.update({ where: { id: getStringParam(req.params.id) }, data: { status: req.body.status, reference: req.body.reference, paidAt: req.body.status === 'PAID' ? new Date() : undefined } });
-  if (req.body.status === 'PAID') await prisma.order.update({ where: { id: payment.orderId }, data: { paymentStatus: 'PAID', status: 'CONFIRMED' } });
+router.patch('/admin/payments/:id', requireAuth, requireRole('ADMIN'), validate(paymentUpdateSchema), asyncHandler(async (req: AuthedRequest, res) => {
+  const id = getStringParam(req.params.id);
+  const existing = await prisma.payment.findUniqueOrThrow({ where: { id } });
+
+  const payment = await prisma.payment.update({
+    where: { id },
+    data: {
+      status: req.body.status,
+      reference: req.body.reference,
+      paidAt: req.body.status === 'PAID' ? new Date() : undefined
+    }
+  });
+
+  if (req.body.status === 'PAID') {
+    await prisma.order.update({ where: { id: payment.orderId }, data: { paymentStatus: 'PAID', status: 'CONFIRMED' } });
+  }
+
+  // FIX P1-013: Explicit audit log for every manual payment status override
+  await prisma.auditLog.create({
+    data: {
+      actorId: req.user!.id,
+      actorEmail: req.user!.email,
+      actorRole: req.user!.role,
+      action: 'PAYMENT_STATUS_OVERRIDE',
+      resource: '/admin/payments',
+      resourceId: id,
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+      metadata: {
+        previousStatus: existing.status,
+        newStatus: req.body.status,
+        reference: req.body.reference,
+        orderId: payment.orderId
+      } as any
+    }
+  });
+
   res.json({ success: true, data: payment });
 }));
 
@@ -668,9 +937,16 @@ router.put('/admin/settings/:key', requireAuth, requireRole('SUPER_ADMIN'), vali
   res.json({ success: true, data: setting });
 }));
 
-router.get('/admin/audit-logs', requireAuth, requireRole('SUPER_ADMIN'), asyncHandler(async (_req, res) => {
-  const data = await prisma.auditLog.findMany({ orderBy: { createdAt: 'desc' }, take: 200 });
-  res.json({ success: true, data });
+router.get('/admin/audit-logs', requireAuth, requireRole('SUPER_ADMIN'), asyncHandler(async (req, res) => {
+  const { page, limit, skip } = parsePagination(req, 50);
+  const resource = req.query.resource ? String(req.query.resource) : undefined;
+  const actorId = req.query.actorId ? String(req.query.actorId) : undefined;
+  const where = { ...(resource ? { resource: { contains: resource } } : {}), ...(actorId ? { actorId } : {}) };
+  const [total, logs] = await Promise.all([
+    prisma.auditLog.count({ where }),
+    prisma.auditLog.findMany({ where, orderBy: { createdAt: 'desc' }, skip, take: limit })
+  ]);
+  res.json({ success: true, ...paginatedResponse(logs, total, page, limit) });
 }));
 
 router.post('/mail/test', requireAuth, requireRole('ADMIN'), validate(mailTestSchema), asyncHandler(async (req, res) => {

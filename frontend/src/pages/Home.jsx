@@ -287,8 +287,9 @@ function GoogleButton({ onGoogleLogin, setError, label = 'Continue with Google' 
 }
 
 export function LoginPage({ onLogin, onGoogleLogin, setRoute }) {
-  const [email, setEmail] = useState(import.meta.env.DEV ? 'customer@luxe.test' : '');
-  const [password, setPassword] = useState(import.meta.env.DEV ? 'password123' : '');
+  // FIX P0-005: No pre-filled credentials — ever
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const submit = async (e) => {
@@ -299,7 +300,7 @@ export function LoginPage({ onLogin, onGoogleLogin, setRoute }) {
     catch (err) { setError(err.message || 'Unable to sign in'); }
     finally { setLoading(false); }
   };
-  return <section className="login-page"><form className="login-card glass auth-card" onSubmit={submit}><span className="brand-mark solo"><Crown size={24}/></span><span className="eyebrow">Customer Account</span><h1>Sign in to your account</h1><p>Track orders, manage your wishlist, and checkout faster.</p>{error && <div className="auth-error">{error}</div>}<GoogleButton onGoogleLogin={onGoogleLogin} setError={setError} /><div className="auth-divider"><span></span><b>or</b><span></span></div><input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" type="email" autoComplete="email" required/><input value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" type="password" autoComplete="current-password" required/><button className="pill dark large full" disabled={loading}>{loading?'Signing in...':'Sign In'}</button><div className="auth-links"><button type="button" onClick={()=>setRoute('customer-register')}>Create account</button><button type="button" onClick={()=>setRoute('forgot-password')}>Forgot password?</button></div>{import.meta.env.DEV && <small>Demo customer: customer@luxe.test / password123</small>}</form></section>;
+  return <section className="login-page"><form className="login-card glass auth-card" onSubmit={submit}><span className="brand-mark solo"><Crown size={24}/></span><span className="eyebrow">Customer Account</span><h1>Sign in to your account</h1><p>Track orders, manage your wishlist, and checkout faster.</p>{error && <div className="auth-error">{error}</div>}<GoogleButton onGoogleLogin={onGoogleLogin} setError={setError} /><div className="auth-divider"><span></span><b>or</b><span></span></div><input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" type="email" autoComplete="email" required/><input value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" type="password" autoComplete="current-password" required/><button className="pill dark large full" disabled={loading}>{loading?'Signing in...':'Sign In'}</button><div className="auth-links"><button type="button" onClick={()=>setRoute('customer-register')}>Create account</button><button type="button" onClick={()=>setRoute('forgot-password')}>Forgot password?</button></div></form></section>;
 }
 
 export function RegisterPage({ onRegister, onGoogleLogin, setRoute }) {
@@ -391,9 +392,9 @@ export function AcceptInvitePage({ setRoute, setUser }) {
     if (password !== confirmPassword) return setError('Passwords do not match.');
     setSubmitting(true);
     try {
+      // FIX P0-004: User state lives in React only — no localStorage
       const account = await acceptInvitation({ token, password });
       if (setUser) {
-        localStorage.setItem('luxe-user', JSON.stringify(account));
         setUser(account);
       }
       setMessage('Invitation accepted. Redirecting to admin dashboard...');
@@ -409,8 +410,9 @@ export function AcceptInvitePage({ setRoute, setUser }) {
 }
 
 export function AdminLoginPage({ onLogin }) {
-  const [email, setEmail] = useState(import.meta.env.DEV ? 'owner@luxe.test' : '');
-  const [password, setPassword] = useState(import.meta.env.DEV ? 'password123' : '');
+  // FIX P0-005: No pre-filled credentials — ever
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const submit = async (e) => {

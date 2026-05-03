@@ -19,43 +19,32 @@ export const customers = [
   { name: 'Clara Lim', email: 'clara@example.com', spend: 76300, tag: 'Repeat', orders: 12 }
 ];
 
-const demoUsers = {
-  'owner@luxe.test': { name: 'Store Owner', email: 'owner@luxe.test', role: 'SUPER_ADMIN' },
-  'admin@luxe.test': { name: 'Admin Manager', email: 'admin@luxe.test', role: 'ADMIN' },
-  'inventory@luxe.test': { name: 'Inventory Staff', email: 'inventory@luxe.test', role: 'INVENTORY_STAFF' },
-  'orders@luxe.test': { name: 'Order Staff', email: 'orders@luxe.test', role: 'ORDER_STAFF' },
-  'customer@luxe.test': { name: 'Maria Customer', email: 'customer@luxe.test', role: 'CUSTOMER' }
-};
-
-export const mockSignIn = async ({ email }) => {
-  await new Promise((resolve) => setTimeout(resolve, 450));
-  const normalized = String(email || '').toLowerCase().trim();
-  return demoUsers[normalized] || { name: normalized.split('@')[0] || 'Customer', email: normalized || 'customer@luxe.test', role: 'CUSTOMER' };
-};
-
-export const mockSignUp = async ({ name, email }) => {
-  await new Promise((resolve) => setTimeout(resolve, 450));
-  return { name: name || 'New Customer', email: email || 'customer@luxe.test', role: 'CUSTOMER' };
-};
-
-export const formatPeso = (value) => new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', maximumFractionDigits: 0 }).format(value);
-
-
-export const API_BASE_URL = import.meta.env.VITE_API_URL || '';
-export const IS_DEMO_MODE = import.meta.env.DEV && !API_BASE_URL;
+// FIX P0-004 & P1-011: Access token stored in memory ONLY — never in localStorage or sessionStorage.
+// Memory-only tokens are cleared on page refresh (intentional — refreshSession() re-issues via httpOnly cookie).
+// Storing tokens in localStorage exposes them to XSS attacks from any third-party script on the page.
+let _memoryAccessToken = null;
 
 function setAccessToken(token) {
-  if (token) localStorage.setItem('luxe-access-token', token);
+  _memoryAccessToken = token || null;
+}
+
+function getAccessToken() {
+  return _memoryAccessToken;
 }
 
 export function clearAuthStorage() {
+  _memoryAccessToken = null;
+  // Clean up any tokens that may have been set by the old code
   localStorage.removeItem('luxe-user');
   localStorage.removeItem('luxe-access-token');
 }
 
+export const API_BASE_URL = import.meta.env.VITE_API_URL || '';
+export const IS_DEMO_MODE = import.meta.env.DEV && !API_BASE_URL;
+
 export async function apiRequest(path, options = {}) {
   if (!API_BASE_URL) throw new Error('VITE_API_URL is not configured. Demo mode is available only in development.');
-  const token = localStorage.getItem('luxe-access-token');
+  const token = getAccessToken();
   const response = await fetch(API_BASE_URL + path, {
     ...options,
     credentials: 'include',
@@ -66,14 +55,23 @@ export async function apiRequest(path, options = {}) {
     }
   });
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    // Token may have expired — clear it so next call triggers a refresh
+    setAccessToken(null);
+  }
   if (!response.ok) throw new Error(payload.message || 'API request failed');
   return payload.data;
 }
 
 export async function customerSignIn(credentials) {
   if (IS_DEMO_MODE) {
-    const user = await mockSignIn(credentials);
-    if (user.role !== 'CUSTOMER') throw new Error('Please use a customer account.');
+    const demoUsers = {
+      'customer@luxe.test': { name: 'Maria Customer', email: 'customer@luxe.test', role: 'CUSTOMER' }
+    };
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const normalized = String(credentials.email || '').toLowerCase().trim();
+    const user = demoUsers[normalized];
+    if (!user || user.role !== 'CUSTOMER') throw new Error('Please use a customer account.');
     return user;
   }
   const data = await apiRequest('/auth/customer/login', { method: 'POST', body: JSON.stringify(credentials) });
@@ -83,8 +81,16 @@ export async function customerSignIn(credentials) {
 
 export async function adminSignIn(credentials) {
   if (IS_DEMO_MODE) {
-    const user = await mockSignIn(credentials);
-    if (user.role === 'CUSTOMER') throw new Error('Admin access required.');
+    const demoAdmins = {
+      'owner@luxe.test': { name: 'Store Owner', email: 'owner@luxe.test', role: 'SUPER_ADMIN' },
+      'admin@luxe.test': { name: 'Admin Manager', email: 'admin@luxe.test', role: 'ADMIN' },
+      'inventory@luxe.test': { name: 'Inventory Staff', email: 'inventory@luxe.test', role: 'INVENTORY_STAFF' },
+      'orders@luxe.test': { name: 'Order Staff', email: 'orders@luxe.test', role: 'ORDER_STAFF' }
+    };
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const normalized = String(credentials.email || '').toLowerCase().trim();
+    const user = demoAdmins[normalized];
+    if (!user) throw new Error('Admin access required.');
     return user;
   }
   const data = await apiRequest('/auth/admin/login', { method: 'POST', body: JSON.stringify(credentials) });
@@ -93,7 +99,10 @@ export async function adminSignIn(credentials) {
 }
 
 export async function signUp(payload) {
-  if (IS_DEMO_MODE) return mockSignUp(payload);
+  if (IS_DEMO_MODE) {
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    return { name: payload.name || 'New Customer', email: payload.email || 'customer@luxe.test', role: 'CUSTOMER' };
+  }
   const data = await apiRequest('/auth/register', { method: 'POST', body: JSON.stringify(payload) });
   setAccessToken(data.accessToken);
   return data.user;
@@ -152,10 +161,13 @@ export async function logout() {
 
 export async function refreshSession() {
   if (IS_DEMO_MODE) return null;
+  // Refresh uses the httpOnly cookie — no token needed in the Authorization header
   const data = await apiRequest('/auth/refresh', { method: 'POST', body: JSON.stringify({}) });
   setAccessToken(data.accessToken);
   return data.user;
 }
+
+export const formatPeso = (value) => new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP', maximumFractionDigits: 0 }).format(value);
 
 export async function fetchProducts(params = {}) {
   if (IS_DEMO_MODE) return products;
@@ -168,7 +180,6 @@ export async function fetchProduct(slug) {
   return apiRequest(`/products/${slug}`);
 }
 
-// Cart APIs
 export async function getCart() {
   if (IS_DEMO_MODE) return [];
   return apiRequest('/cart');
@@ -194,7 +205,6 @@ export async function clearCart() {
   return apiRequest('/cart/clear', { method: 'POST' });
 }
 
-// Order APIs
 export async function createOrder(payload) {
   if (IS_DEMO_MODE) throw new Error('Demo mode cannot create orders');
   return apiRequest('/orders', { method: 'POST', body: JSON.stringify(payload) });
@@ -210,7 +220,6 @@ export async function fetchMyOrders() {
   return apiRequest('/orders/me');
 }
 
-// Payment APIs
 export async function createCheckoutSession(payload) {
   if (IS_DEMO_MODE) throw new Error('Demo mode cannot create payments');
   return apiRequest('/payments/checkout', { method: 'POST', body: JSON.stringify(payload) });

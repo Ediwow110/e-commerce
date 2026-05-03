@@ -66,8 +66,13 @@ model User {
   reviews       Review[]
   passwordResetTokens PasswordResetToken[]
   refreshSessions RefreshSession[]
-  invitationsSent AdminInvitation[] @relation("InvitedBy")
-  invitation      AdminInvitation? @relation("InvitedUser")
+  invitationsSent  AdminInvitation[] @relation("InvitedBy")
+  invitation       AdminInvitation? @relation("InvitedUser")
+  promoRedemptions PromoRedemption[]
+
+  @@index([role])
+  @@index([isActive])
+  @@index([createdAt])
 }
 
 model AdminInvitation {
@@ -83,6 +88,9 @@ model AdminInvitation {
   updatedAt   DateTime @updatedAt
   user        User     @relation("InvitedUser", fields: [userId], references: [id], onDelete: Cascade)
   invitedBy   User     @relation("InvitedBy", fields: [invitedById], references: [id])
+
+  @@index([invitedById])
+  @@index([expiresAt])
 }
 
 model PasswordResetToken {
@@ -93,6 +101,9 @@ model PasswordResetToken {
   usedAt    DateTime?
   createdAt DateTime @default(now())
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 model RefreshSession {
@@ -106,6 +117,10 @@ model RefreshSession {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
 }
 
 model Address {
@@ -122,6 +137,8 @@ model Address {
   country   String   @default("Philippines")
   isDefault Boolean  @default(false)
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Category {
@@ -154,6 +171,12 @@ model Product {
   cartItems   CartItem[]
   wishlistItems WishlistItem[]
   reviews     Review[]
+
+  @@index([categoryId])
+  @@index([isActive])
+  @@index([isFeatured])
+  @@index([isActive, isFeatured])
+  @@index([createdAt])
 }
 
 model ProductVariant {
@@ -171,6 +194,9 @@ model ProductVariant {
   movements   InventoryMovement[]
   orderItems  OrderItem[]
   cartItems   CartItem[]
+
+  @@index([productId])
+  @@index([stock])
 }
 
 model ProductImage {
@@ -180,6 +206,8 @@ model ProductImage {
   alt       String?
   sortOrder Int     @default(0)
   product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
 }
 
 model InventoryMovement {
@@ -190,6 +218,9 @@ model InventoryMovement {
   note        String?
   createdAt   DateTime          @default(now())
   variant     ProductVariant    @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@index([variantId])
+  @@index([createdAt])
 }
 
 model CartItem {
@@ -201,7 +232,9 @@ model CartItem {
   user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
   variant   ProductVariant? @relation(fields: [variantId], references: [id])
+
   @@unique([userId, productId, variantId])
+  @@index([userId])
 }
 
 model WishlistItem {
@@ -211,7 +244,9 @@ model WishlistItem {
   createdAt DateTime @default(now())
   user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
   product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
   @@unique([userId, productId])
+  @@index([userId])
 }
 
 model PromoCode {
@@ -226,6 +261,10 @@ model PromoCode {
   usedCount   Int      @default(0)
   isActive    Boolean  @default(true)
   orders      Order[]
+  redemptions PromoRedemption[]
+
+  @@index([isActive])
+  @@index([endsAt])
 }
 
 model Order {
@@ -247,6 +286,12 @@ model Order {
   items         OrderItem[]
   payment       Payment?
   shipment      Shipment?
+
+  @@index([userId])
+  @@index([userId, createdAt])
+  @@index([status])
+  @@index([paymentStatus])
+  @@index([createdAt])
 }
 
 model OrderItem {
@@ -262,6 +307,9 @@ model OrderItem {
   order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product   Product @relation(fields: [productId], references: [id])
   variant   ProductVariant? @relation(fields: [variantId], references: [id])
+
+  @@index([orderId])
+  @@index([productId])
 }
 
 model Payment {
@@ -277,6 +325,9 @@ model Payment {
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
   order       Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([createdAt])
 }
 
 model Shipment {
@@ -301,6 +352,10 @@ model Review {
   createdAt DateTime @default(now())
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, productId])
+  @@index([productId])
+  @@index([isApproved])
 }
 
 model ContentBlock {
@@ -333,6 +388,10 @@ model AuditLog {
   userAgent   String?
   metadata    Json?
   createdAt   DateTime @default(now())
+
+  @@index([actorId])
+  @@index([resource])
+  @@index([createdAt])
 }
 
 model WebhookEvent {
@@ -343,13 +402,22 @@ model WebhookEvent {
   processedAt DateTime?
   payload     Json
   createdAt   DateTime @default(now())
+
+  @@index([provider])
+  @@index([createdAt])
+  @@index([processedAt])
 }
 
 model PromoRedemption {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   userId      String
   promoCodeId String
   orderId     String?
-  createdAt   DateTime @default(now())
+  createdAt   DateTime  @default(now())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  promoCode   PromoCode @relation(fields: [promoCodeId], references: [id], onDelete: Cascade)
+
   @@unique([userId, promoCodeId, orderId])
+  @@index([userId])
+  @@index([promoCodeId])
 }
