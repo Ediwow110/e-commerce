@@ -14,7 +14,14 @@ export function signAccessToken(payload: object) {
   return jwt.sign(payload, env.JWT_ACCESS_SECRET as Secret, options);
 }
 export function signRefreshToken(payload: object) {
-  const options: SignOptions = { expiresIn: env.JWT_REFRESH_EXPIRES_IN as SignOptions['expiresIn'] };
+  // jwtid (jti) makes every refresh token unique even when issued in the same
+  // second with an identical payload. Without this, two logins back-to-back for
+  // the same user produce the SAME JWT, which collides on RefreshSession.tokenHash
+  // (unique). Reuse-detection then can't distinguish two legitimate sessions.
+  const options: SignOptions = {
+    expiresIn: env.JWT_REFRESH_EXPIRES_IN as SignOptions['expiresIn'],
+    jwtid: crypto.randomBytes(16).toString('hex')
+  };
   return jwt.sign(payload, env.JWT_REFRESH_SECRET as Secret, options);
 }
 export function verifyRefreshToken(token: string) {

@@ -186,7 +186,10 @@ function timingSafeEqualHex(a: string, b: string): boolean {
  * Docs: https://developers.paymongo.com/docs/webhooks
  */
 function verifyPaymongo(rawBody: string, headers: IncomingHttpHeaders): boolean {
-  const secret = env.PAYMENT_WEBHOOK_SECRET;
+  // Read process.env at call time so tests can override per-case. In production
+  // env.PAYMENT_WEBHOOK_SECRET is the same value (zod-parsed from process.env)
+  // so behaviour is unchanged outside tests.
+  const secret = process.env.PAYMENT_WEBHOOK_SECRET || env.PAYMENT_WEBHOOK_SECRET;
   if (!secret) return false;
   const header = String(headers['paymongo-signature'] || headers['x-paymongo-signature'] || '');
   if (!header) return false;
@@ -238,7 +241,7 @@ function verifyMaya(_rawBody: string, headers: IncomingHttpHeaders): boolean {
  */
 function verifyMock(rawBody: string, headers: IncomingHttpHeaders): boolean {
   if (env.NODE_ENV === 'production') return false;
-  const secret = env.PAYMENT_WEBHOOK_SECRET;
+  const secret = process.env.PAYMENT_WEBHOOK_SECRET || env.PAYMENT_WEBHOOK_SECRET;
   if (!secret) return false;
   const provided = String(headers['x-luxe-signature'] || '');
   if (!provided) return false;

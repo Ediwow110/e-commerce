@@ -578,7 +578,12 @@ router.post('/orders', requireAuth, requirePermission('checkout:create'), valida
     promoRecord = { id: found.id, type: found.type, value: Number(found.value), minSubtotal: found.minSubtotal ? Number(found.minSubtotal) : null, usageLimit: found.usageLimit, usedCount: found.usedCount };
   }
 
-  const order = await prisma.$transaction(async (tx) => {
+  // Phase 3 retry loop: under heavy concurrency, Postgres Serializable isolation
+  // legitimately throws P2034 ("could not serialize") — that's the engine telling
+  // us a conflicting concurrent transaction won the race. Retry with jitter up to
+  // a small bound; if we still can't commit, the underlying constraint (e.g. stock
+  // sold out) will surface as a 4xx on the next attempt.
+  const runCheckoutTx = () => prisma.$transaction(async (tx) => {
     // Re-fetch cart inside the transaction so all reads are in the same snapshot
     const cart = await tx.cartItem.findMany({
       where: { userId },
@@ -701,6 +706,24 @@ router.post('/orders', requireAuth, requirePermission('checkout:create'), valida
 
     return created;
   }, { isolationLevel: 'Serializable' });
+
+  let order: Awaited<ReturnType<typeof runCheckoutTx>>;
+  const MAX_TX_RETRIES = 5;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      order = await runCheckoutTx();
+      break;
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code;
+      // P2034 = serialization conflict; 40001 = serialization failure; 40P01 = deadlock
+      const isRetriable = code === 'P2034' || code === '40001' || code === '40P01';
+      if (!isRetriable || attempt >= MAX_TX_RETRIES) throw err;
+      // Exponential backoff with jitter (5–15ms, 10–30ms, 20–60ms, 40–120ms, 80–240ms)
+      const baseMs = 5 * Math.pow(2, attempt);
+      const jitterMs = Math.floor(Math.random() * baseMs * 2);
+      await new Promise((r) => setTimeout(r, baseMs + jitterMs));
+    }
+  }
 
   // Send acknowledgement email (payment pending — full receipt sent after webhook confirms PAID)
   await sendMail({
