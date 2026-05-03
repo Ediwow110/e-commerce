@@ -13,7 +13,7 @@ import { adminInvitationTemplate, orderConfirmationTemplate, orderReceiptTemplat
 import { env } from './env.js';
 import { createPaymentCheckout, verifyProviderWebhookSignature } from './payment.service.js';
 import { assertOrderTransition, canWebhookMarkPaid } from './orderState.js';
-import { TWO_FA_REQUIRED_ROLES, assertTwoFactorEnrolled, buildOtpauthUrl, consumeBackupCode, generateBackupCodes, generateSecret, hashBackupCodes, verifyTotp } from './twoFactor.js';
+import { TWO_FA_REQUIRED_ROLES, assertTwoFactorEnrolled, buildOtpauthUrl, consumeBackupCode, generateBackupCodes, generateSecret, hashBackupCodes, isTwoFactorRequired, verifyTotp } from './twoFactor.js';
 import { logger } from './logger.js';
 
 export const router = Router();
@@ -124,10 +124,18 @@ async function issueAuthResponse(res: Response, req: AuthedRequest, user: { id: 
     }
   });
   setRefreshCookie(res, response.refreshToken);
-  // Return refreshToken in body too — SPA / mobile clients that don't use
-  // cookie-based sessions need it. Browser web clients can safely ignore it
-  // because the same value is also set as an HttpOnly cookie.
-  return { user: response.user, accessToken: response.accessToken, refreshToken: response.refreshToken };
+  // Web browsers MUST use the httpOnly refresh cookie that was just set.
+  // Native mobile clients without a cookie jar can opt-in to the JSON-body
+  // fallback by sending `X-Client-Type: mobile`. Keeping the refresh token
+  // out of any document an XSS payload could read is a hard requirement for
+  // browser sessions; mobile apps run in a sandboxed runtime where the same
+  // XSS surface does not exist.
+  const isMobileClient = String(req.get('x-client-type') || '').toLowerCase() === 'mobile';
+  return {
+    user: response.user,
+    accessToken: response.accessToken,
+    ...(isMobileClient ? { refreshToken: response.refreshToken } : {})
+  };
 }
 
 async function authenticateWithRole(email: string, password: string, allowedRoles: string[], req?: AuthedRequest) {
@@ -230,7 +238,8 @@ router.post('/auth/admin/login', authLimiter, validate(loginSchema), asyncHandle
     return res.json({ success: true, data: { twoFactorRequired: true, ticket } });
   }
   // If policy enforces 2FA for sensitive roles and they have not enrolled, block login.
-  if (env.ENFORCE_ADMIN_2FA === 'true' && TWO_FA_REQUIRED_ROLES.has(user.role)) {
+  // Uses isTwoFactorRequired() so that LAUNCH_MODE=production always gates regardless of the flag.
+  if (isTwoFactorRequired(user.role)) {
     assertTwoFactorEnrolled(user.role, user);
   }
   await prisma.auditLog.create({ data: { actorId: user.id, actorEmail: user.email, actorRole: user.role, action: 'ADMIN_LOGIN', resource: '/auth/admin/login', ipAddress: req.ip, userAgent: req.get('user-agent') } }).catch((err) => logger.error({ err }, 'audit ADMIN_LOGIN failed'));

@@ -66,6 +66,28 @@ const twoFaVerifyLimiter = rateLimit({
 app.use(['/api/auth/login', '/api/auth/admin/login', '/api/auth/google', '/api/auth/forgot-password', '/api/auth/reset-password'], credentialLimiter);
 app.use('/api/auth/admin/2fa/login', twoFaVerifyLimiter);
 
+// CSRF defence-in-depth for cookie-bearing state-changing auth endpoints.
+// CORS already rejects cross-origin XHR/fetch with credentials, but a plain
+// HTML <form action="/api/auth/refresh" method="POST"> would still send the
+// httpOnly refresh cookie cross-site (SameSite=lax permits top-level POST in
+// some configurations). When a refresh cookie is present, we require the
+// request's Origin/Referer to match an allow-listed origin. Mobile/native
+// clients send neither cookie nor Origin and pass through unaffected.
+const corsOriginsSet = new Set(corsOrigins);
+function requireSameOriginForCookieAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const cookieHeader = req.headers.cookie || '';
+  if (!cookieHeader.includes('luxe_refresh_token=')) return next();
+  const originHeader = req.get('origin') || req.get('referer') || '';
+  if (!originHeader) return next(); // server-to-server / scripted clients
+  try {
+    const url = new URL(originHeader);
+    const candidate = `${url.protocol}//${url.host}`;
+    if (corsOriginsSet.has(candidate)) return next();
+  } catch { /* fall through to reject */ }
+  res.status(403).json({ success: false, message: 'Cross-origin auth request rejected' });
+}
+app.use(['/api/auth/refresh', '/api/auth/logout'], requireSameOriginForCookieAuth);
+
 // Liveness — process is up. Used by load balancer.
 app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'luxe-api', uptime: process.uptime() });

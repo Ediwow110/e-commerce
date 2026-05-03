@@ -180,7 +180,7 @@ export function CheckoutPage({ setRoute, user }) {
 
   useEffect(() => {
     let active = true;
-    if (!user && !IS_DEMO_MODE) { setRoute('customer-login'); return; }
+    if (!user && !IS_DEMO_MODE) { sessionStorage.setItem('luxe-return-to', 'checkout'); setRoute('customer-login'); return; }
     if (IS_DEMO_MODE) {
       setCartItems(products.slice(0,2).map((p, i) => ({ id: i+1, product: p, quantity: 1, variant: null })));
       setLoading(false);
@@ -456,7 +456,7 @@ export function LoginPage({ onLogin, onGoogleLogin, setRoute }) {
     catch (err) { setError(err.message || 'Unable to sign in'); }
     finally { setLoading(false); }
   };
-  return <section className="login-page"><form className="login-card glass auth-card" onSubmit={submit}><span className="brand-mark solo"><Crown size={24}/></span><span className="eyebrow">Customer Account</span><h1>Sign in to your account</h1><p>Track orders, manage your wishlist, and checkout faster.</p>{error && <div className="auth-error">{error}</div>}<GoogleButton onGoogleLogin={onGoogleLogin} setError={setError} /><div className="auth-divider"><span></span><b>or</b><span></span></div><input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" type="email" autoComplete="email" required/><input value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" type="password" autoComplete="current-password" required/><button className="pill dark large full" disabled={loading}>{loading?'Signing in...':'Sign In'}</button><div className="auth-links"><button type="button" onClick={()=>setRoute('customer-register')}>Create account</button><button type="button" onClick={()=>setRoute('forgot-password')}>Forgot password?</button></div></form></section>;
+  return <section className="login-page"><form className="login-card glass auth-card" onSubmit={submit}><span className="brand-mark solo"><Crown size={24}/></span><span className="eyebrow">Customer Account</span><h1>Welcome back</h1><p>Sign in to track orders, manage your wishlist, and checkout faster. Staff accounts must use the <a href="/admin/login">staff portal</a>.</p>{error && <div className="auth-error">{error}</div>}<GoogleButton onGoogleLogin={onGoogleLogin} setError={setError} /><div className="auth-divider"><span></span><b>or</b><span></span></div><input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" type="email" autoComplete="email" required/><input value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" type="password" autoComplete="current-password" required/><button className="pill dark large full" disabled={loading}>{loading?'Signing in...':'Sign In'}</button><div className="auth-links"><button type="button" onClick={()=>setRoute('customer-register')}>Create account</button><button type="button" onClick={()=>setRoute('forgot-password')}>Forgot password?</button></div></form></section>;
 }
 
 export function RegisterPage({ onRegister, onGoogleLogin, setRoute }) {
@@ -565,21 +565,44 @@ export function AcceptInvitePage({ setRoute, setUser }) {
   return <section className="login-page admin-login-page"><form className="login-card glass auth-card" onSubmit={submit}><span className="brand-mark solo"><Crown size={24}/></span><span className="eyebrow">Staff Invitation</span><h1>Accept your invitation</h1>{loading ? <p>Loading invitation…</p> : error && !invite ? <><div className="auth-error">{error}</div><div className="auth-links"><button type="button" onClick={()=>setRoute('admin-login')}>Back to staff sign in</button></div></> : invite ? <><p>Welcome, <b>{invite.name}</b>. You have been invited as <b>{invite.role}</b>. Set a password to activate your <b>{invite.email}</b> staff account.</p>{error && <div className="auth-error">{error}</div>}{message && <div className="auth-success">{message}</div>}<input value={password} onChange={e=>setPassword(e.target.value)} placeholder="New password" type="password" required minLength={8} /><input value={confirmPassword} onChange={e=>setConfirmPassword(e.target.value)} placeholder="Confirm password" type="password" required minLength={8} /><button className="pill dark large full" disabled={submitting}>{submitting ? 'Activating account...' : 'Activate Staff Account'}</button><div className="auth-links"><button type="button" onClick={()=>setRoute('admin-login')}>Already activated? Sign in</button></div></> : null}</form></section>;
 }
 
-export function AdminLoginPage({ onLogin }) {
+export function AdminLoginPage({ onLogin, onVerify2FA }) {
   // FIX P0-005: No pre-filled credentials — ever
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const submit = async (e) => {
+  // 2FA second-step state
+  const [twoFa, setTwoFa] = useState(null); // { ticket: string }
+  const [code, setCode] = useState('');
+
+  const submitCredentials = async (e) => {
     e.preventDefault();
-    setError('');
-    setLoading(true);
-    try { await onLogin({ email, password }); }
-    catch (err) { setError(err.message || 'Unable to sign in'); }
+    setError(''); setLoading(true);
+    try {
+      const result = await onLogin({ email, password });
+      if (result && result.twoFactorRequired) {
+        setTwoFa({ ticket: result.ticket });
+        setPassword(''); // wipe password from memory once we no longer need it
+      }
+    } catch (err) { setError(err.message || 'Unable to sign in'); }
     finally { setLoading(false); }
   };
-  return <section className="login-page admin-login-page"><form className="login-card glass auth-card" onSubmit={submit}><span className="brand-mark solo"><Crown size={24}/></span><span className="eyebrow">Staff Portal</span><h1>Authorized staff only</h1><p>Use your staff email and password to access the internal operations portal.</p>{error && <div className="auth-error">{error}</div>}<input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" type="email" autoComplete="email" required/><input value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" type="password" autoComplete="current-password" required/><button className="pill dark large full" disabled={loading}>{loading?'Signing in...':'Sign in'}</button>{import.meta.env.DEV && <small>Local seed staff credentials only available in development.</small>}</form></section>;
+
+  const submit2FA = async (e) => {
+    e.preventDefault();
+    setError(''); setLoading(true);
+    try { await onVerify2FA({ ticket: twoFa.ticket, code: code.trim() }); }
+    catch (err) { setError(err.message || 'Invalid 2FA code'); }
+    finally { setLoading(false); }
+  };
+
+  const cancel2FA = () => { setTwoFa(null); setCode(''); setError(''); };
+
+  if (twoFa) {
+    return <section className="login-page admin-login-page"><form className="login-card glass auth-card" onSubmit={submit2FA}><span className="brand-mark solo"><Crown size={24}/></span><span className="eyebrow">Two-Factor Verification</span><h1>Enter your 6-digit code</h1><p>Open your authenticator app and enter the current code, or use a backup code (XXXXX-XXXXX).</p>{error && <div className="auth-error">{error}</div>}<input value={code} onChange={e=>setCode(e.target.value)} placeholder="Code" inputMode="numeric" autoComplete="one-time-code" autoFocus required minLength={6} /><button className="pill dark large full" disabled={loading || code.trim().length < 6}>{loading?'Verifying...':'Verify'}</button><div className="auth-links"><button type="button" onClick={cancel2FA}>Use a different account</button></div></form></section>;
+  }
+
+  return <section className="login-page admin-login-page"><form className="login-card glass auth-card" onSubmit={submitCredentials}><span className="brand-mark solo"><Crown size={24}/></span><span className="eyebrow">Staff Portal</span><h1>Authorized staff only</h1><p>For staff access only. Customer accounts cannot sign in here — please use the customer login page.</p>{error && <div className="auth-error">{error}</div>}<input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" type="email" autoComplete="email" required/><input value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" type="password" autoComplete="current-password" required/><button className="pill dark large full" disabled={loading}>{loading?'Signing in...':'Sign in'}</button>{import.meta.env.DEV && <small>Local seed staff credentials only available in development.</small>}</form></section>;
 }
 
 export function AdminPage({ route }) {

@@ -21,7 +21,10 @@ d('refresh token rotation', () => {
   async function loginNewUser(email = `rot-${Date.now()}@luxe.test`) {
     const passwordHash = await hashPassword('correct-horse-battery');
     await prisma.user.create({ data: { name: 'Rotator', email, role: 'CUSTOMER', passwordHash } });
-    const res = await request(app).post('/api/auth/customer/login').send({ email, password: 'correct-horse-battery' });
+    // Mobile-style client opts into receiving the refresh token in the JSON
+    // body. Browser web logins (no X-Client-Type header) never get it back —
+    // the cookie is the only carrier. See Phase 5 of the auth review.
+    const res = await request(app).post('/api/auth/customer/login').set('x-client-type', 'mobile').send({ email, password: 'correct-horse-battery' });
     expect(res.status).toBe(200);
     return { userEmail: email, refreshToken: res.body.data.refreshToken as string };
   }
@@ -30,11 +33,11 @@ d('refresh token rotation', () => {
     const { userEmail, refreshToken } = await loginNewUser();
 
     // First refresh — original is rotated, new pair issued.
-    const r1 = await request(app).post('/api/auth/refresh').send({ refreshToken });
+    const r1 = await request(app).post('/api/auth/refresh').set('x-client-type', 'mobile').send({ refreshToken });
     expect(r1.status).toBe(200);
 
     // Replay original — must trigger reuse detection.
-    const r2 = await request(app).post('/api/auth/refresh').send({ refreshToken });
+    const r2 = await request(app).post('/api/auth/refresh').set('x-client-type', 'mobile').send({ refreshToken });
     expect(r2.status).toBe(401);
     expect(r2.body.message).toMatch(/reuse/i);
 

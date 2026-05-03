@@ -57,8 +57,18 @@ export function hasPermission(role: string | undefined, permission: string) {
 export function requireAuth(req: AuthedRequest, _res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) throw new ApiError(401, 'Missing bearer token');
-  try { req.user = jwt.verify(header.slice(7), env.JWT_ACCESS_SECRET) as any; next(); }
+  let decoded: any;
+  try { decoded = jwt.verify(header.slice(7), env.JWT_ACCESS_SECRET); }
   catch { throw new ApiError(401, 'Invalid or expired token'); }
+  // 2FA-pending tickets are NOT real access tokens. They may only be presented
+  // to /auth/admin/2fa/login (which verifies them inline). Accepting them as
+  // bearer tokens for protected routes would let an attacker who has a valid
+  // password but not the TOTP bypass 2FA entirely.
+  if (decoded?.scope && decoded.scope !== 'access') {
+    throw new ApiError(401, 'This token cannot be used for authentication');
+  }
+  req.user = decoded;
+  next();
 }
 
 export const requireRole = (...roles: string[]) => (req: AuthedRequest, _res: Response, next: NextFunction) => {

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import Header from './components/Header.jsx';
 import Footer from './components/Footer.jsx';
 import AdminLayout from './components/AdminLayout.jsx';
-import { adminSignIn, clearAuthStorage, customerSignIn, logout as performLogout, refreshSession, signInWithGoogle, signUp } from './services/api.js';
+import { adminSignIn, adminVerify2FA, clearAuthStorage, customerSignIn, logout as performLogout, refreshSession, signInWithGoogle, signUp } from './services/api.js';
 import { CustomerHome, ShopPage, CategoryPage, ProductPage, WishlistPage, CartPage, CheckoutPage, ConfirmationPage, TrackingPage, AccountPage, SearchPage, AboutPage, ContactPage, PoliciesPage, TermsPage, PrivacyPage, RefundsPage, ShippingPage, LoginPage, RegisterPage, ForgotPasswordPage, ResetPasswordPage, AcceptInvitePage, AdminLoginPage, AdminPage, SectionTitle } from './pages/Home.jsx';
 
 const adminRoutes = ['admin-dashboard','admin-products','admin-variants','admin-categories','admin-inventory','admin-orders','admin-customers','admin-promos','admin-insights','admin-reviews','admin-reports','admin-payments','admin-shipping','admin-content','admin-users','admin-settings'];
@@ -106,9 +106,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const accessToken = localStorage.getItem('luxe-access-token');
+    // On a fresh page load there is no in-memory access token. If the user
+    // still has a valid httpOnly refresh cookie we silently re-issue a
+    // session; otherwise we stay logged-out. The user object is cached in
+    // localStorage purely for first-paint UI hints and is invalidated as soon
+    // as any request returns 401.
     const storedUser = localStorage.getItem('luxe-user');
-    if (storedUser || !accessToken) return;
+    if (storedUser) return;
     refreshSession()
       .then((account) => {
         if (!account) return;
@@ -118,15 +122,34 @@ export default function App() {
       .catch(() => clearAuthStorage());
   }, []);
 
-  const customerLogin = async (credentials) => {
-    const account = await customerSignIn(credentials);
+  const consumeReturnTo = (fallback) => {
+    const stored = sessionStorage.getItem('luxe-return-to');
+    sessionStorage.removeItem('luxe-return-to');
+    return stored || fallback;
+  };
+  const finishCustomerLogin = (account, fallback = 'home') => {
     if (account.role !== 'CUSTOMER') throw new Error('Please use a customer account.');
     localStorage.setItem('luxe-user', JSON.stringify(account));
     setUser(account);
-    setRoute('home');
+    setRoute(consumeReturnTo(fallback));
+  };
+
+  const customerLogin = async (credentials) => {
+    const { user: account } = await customerSignIn(credentials).then((u) => (u && u.user ? u : { user: u }));
+    finishCustomerLogin(account);
   };
   const adminLogin = async (credentials) => {
-    const account = await adminSignIn(credentials);
+    const result = await adminSignIn(credentials);
+    if (result.twoFactorRequired) return result; // caller (AdminLoginPage) handles step 2
+    const account = result.user;
+    if (!adminRoles.includes(account.role)) throw new Error('Admin access required.');
+    localStorage.setItem('luxe-user', JSON.stringify(account));
+    setUser(account);
+    setRoute('admin-dashboard');
+    return { user: account };
+  };
+  const adminVerify = async ({ ticket, code }) => {
+    const account = await adminVerify2FA({ ticket, code });
     if (!adminRoles.includes(account.role)) throw new Error('Admin access required.');
     localStorage.setItem('luxe-user', JSON.stringify(account));
     setUser(account);
@@ -134,16 +157,12 @@ export default function App() {
   };
   const register = async (payload) => {
     const account = await signUp(payload);
-    localStorage.setItem('luxe-user', JSON.stringify(account));
-    setUser(account);
-    setRoute('home');
+    finishCustomerLogin(account);
   };
   const googleLogin = async (credential) => {
     const account = await signInWithGoogle(credential);
     if (account.role !== 'CUSTOMER') throw new Error('Please use the staff portal for admin access.');
-    localStorage.setItem('luxe-user', JSON.stringify(account));
-    setUser(account);
-    setRoute('home');
+    finishCustomerLogin(account);
   };
   const logout = async () => {
     try { await performLogout(); }
@@ -158,9 +177,9 @@ export default function App() {
   else if (route === 'customer-register') page = <RegisterPage onRegister={register} onGoogleLogin={googleLogin} setRoute={setRoute} />;
   else if (route === 'forgot-password') page = <ForgotPasswordPage setRoute={setRoute} />;
   else if (route === 'reset-password') page = <ResetPasswordPage setRoute={setRoute} />;
-  else if (route === 'admin-login') page = <AdminLoginPage onLogin={adminLogin} />;
+  else if (route === 'admin-login') page = <AdminLoginPage onLogin={adminLogin} onVerify2FA={adminVerify} />;
   else if (adminRoutes.includes(route)) {
-    if (!user) page = <AdminLoginPage onLogin={adminLogin} />;
+    if (!user) page = <AdminLoginPage onLogin={adminLogin} onVerify2FA={adminVerify} />;
     else if (!canAccessAdminRoute(user, route)) page = <RestrictedPage setRoute={setRoute} title="Admin access restricted" message="Your role does not have permission to open this admin section." action={{ label: 'Back to dashboard', route: 'admin-dashboard' }} />;
     else page = <AdminLayout route={route} setRoute={setRoute} user={user}><AdminPage route={route} user={user} /></AdminLayout>;
   } else if (customerProtectedRoutes.includes(route) && !user) {

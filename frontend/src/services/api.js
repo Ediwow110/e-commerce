@@ -34,9 +34,10 @@ function getAccessToken() {
 
 export function clearAuthStorage() {
   _memoryAccessToken = null;
-  // Clean up any tokens that may have been set by the old code
+  // Clean up any items that may have been set by older versions of the app.
   localStorage.removeItem('luxe-user');
   localStorage.removeItem('luxe-access-token');
+  sessionStorage.removeItem('luxe-return-to');
 }
 
 export const API_BASE_URL = import.meta.env.VITE_API_URL || '';
@@ -91,9 +92,24 @@ export async function adminSignIn(credentials) {
     const normalized = String(credentials.email || '').toLowerCase().trim();
     const user = demoAdmins[normalized];
     if (!user) throw new Error('Admin access required.');
-    return user;
+    return { user };
   }
   const data = await apiRequest('/auth/admin/login', { method: 'POST', body: JSON.stringify(credentials) });
+  // 2FA gate: backend returns { twoFactorRequired, ticket } and NO session.
+  // Caller must collect the TOTP/backup code and call adminVerify2FA(ticket, code).
+  if (data && data.twoFactorRequired) {
+    return { twoFactorRequired: true, ticket: data.ticket };
+  }
+  setAccessToken(data.accessToken);
+  return { user: data.user };
+}
+
+export async function adminVerify2FA({ ticket, code }) {
+  if (IS_DEMO_MODE) {
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    return { name: 'Admin Manager', email: 'admin@luxe.test', role: 'ADMIN' };
+  }
+  const data = await apiRequest('/auth/admin/2fa/login', { method: 'POST', body: JSON.stringify({ ticket, code }) });
   setAccessToken(data.accessToken);
   return data.user;
 }
