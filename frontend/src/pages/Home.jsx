@@ -273,7 +273,163 @@ export function AccountPage() { const [orderItems, setOrderItems] = useState(IS_
 export function SearchPage({ setRoute }) { return <section className="section-pad page"><SectionTitle eyebrow="Search" title="Find your next piece" /><div className="shop-tools"><div><Search size={18}/> Try pearl, tote, ring, black...</div></div><div className="product-grid">{products.slice(0,4).map(p => <ProductCard key={p.id} product={p} setRoute={setRoute}/>)}</div></section>; }
 export function AboutPage() { return <section className="section-pad page editorial"><SectionTitle eyebrow="Brand Story" title="Crafted for timeless everyday luxury." /><p>LUXE is a frontend concept for boutiques that need a premium visual experience, trust-driven product pages, and polished browsing flows.</p></section>; }
 export function ContactPage() { return <section className="section-pad page checkout-layout"><div><SectionTitle eyebrow="Contact" title="Talk to the boutique" /><div className="form-card"><input placeholder="Name"/><input placeholder="Email"/><textarea placeholder="Message"></textarea><button className="pill dark">Send Message</button></div></div><div className="summary-card"><h3>Store Details</h3><p>Email: hello@luxe.test</p><p>Phone: +63 900 000 0000</p><p>Hours: 10:00 AM - 7:00 PM</p></div></section>; }
-export function PoliciesPage() { return <section className="section-pad page"><SectionTitle eyebrow="Policies" title="Customer trust pages" /><div className="dashboard-grid">{['Shipping Policy','Return and Exchange Policy','Privacy Policy','Terms and Conditions','Warranty Policy','Care Guide'].map(x=><InfoCard key={x} title={x} value="Frontend page placeholder"/>)}</div></section>; }
+export function PoliciesPage({ setRoute }) {
+  return (
+    <section className="section-pad page">
+      <SectionTitle eyebrow="Policies" title="Customer trust pages" />
+      <div className="dashboard-grid">
+        <button className="info-card" onClick={() => setRoute && setRoute('terms')}><h4>Terms of Service</h4><p>Read the rules of using LUXE Commerce.</p></button>
+        <button className="info-card" onClick={() => setRoute && setRoute('privacy')}><h4>Privacy Policy</h4><p>How we collect, use, and protect your data.</p></button>
+        <button className="info-card" onClick={() => setRoute && setRoute('refunds')}><h4>Refund Policy</h4><p>When and how refunds are processed.</p></button>
+        <button className="info-card" onClick={() => setRoute && setRoute('shipping')}><h4>Shipping Policy</h4><p>Carriers, zones, and delivery timelines.</p></button>
+        <button className="info-card" onClick={() => setRoute && setRoute('contact')}><h4>Contact / Support</h4><p>Reach out to our support team.</p></button>
+      </div>
+    </section>
+  );
+}
+
+const REVIEW_BANNER = (
+  <div style={{ background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: 8, padding: '12px 16px', margin: '12px 0', color: '#92400e', fontSize: 14 }}>
+    <strong>⚠ REQUIRES LEGAL REVIEW.</strong> The text below is a working
+    placeholder. Your business owner / lawyer must review and amend it before
+    production launch. See <code>SOFT_LAUNCH_CHECKLIST.md</code> in the repo.
+  </div>
+);
+
+export function TermsPage() {
+  return (
+    <section className="section-pad page policy-page">
+      <SectionTitle eyebrow="Legal" title="Terms of Service" />
+      {REVIEW_BANNER}
+      <p><em>Last updated: placeholder date — replace before launch.</em></p>
+      <h3>1. Acceptance of terms</h3>
+      <p>By accessing or placing an order on LUXE Commerce ("we", "us", "our"), you agree to be bound by these Terms of Service. If you do not agree, do not use this site.</p>
+      <h3>2. Eligibility</h3>
+      <p>You must be at least 18 years old, or the age of majority in your jurisdiction, to place an order. By ordering you confirm you meet this requirement.</p>
+      <h3>3. Orders & pricing</h3>
+      <p>All prices are listed in the displayed currency and include applicable taxes unless stated otherwise. We reserve the right to refuse or cancel any order in cases of suspected fraud, pricing errors, or stock unavailability. In such cases any payment will be refunded in full.</p>
+      <h3>4. Payment</h3>
+      <p>Payments are processed by third-party providers (PayMongo, Maya, Xendit). We do not store your full card number. Each provider's own terms also apply to your payment.</p>
+      <h3>5. Shipping & delivery</h3>
+      <p>See our Shipping Policy for carriers, zones, and timelines. Title and risk of loss pass to you upon hand-off to the carrier.</p>
+      <h3>6. Returns & refunds</h3>
+      <p>See our Refund Policy.</p>
+      <h3>7. Intellectual property</h3>
+      <p>All product imagery, text, logos, and the LUXE name are owned by us or our licensors. You may not reproduce them without written permission.</p>
+      <h3>8. Account security</h3>
+      <p>You are responsible for keeping your account credentials confidential. Notify us immediately at the support email if you suspect unauthorised access.</p>
+      <h3>9. Limitation of liability</h3>
+      <p>To the maximum extent permitted by law, our total liability for any claim is limited to the amount you paid for the order giving rise to the claim.</p>
+      <h3>10. Governing law</h3>
+      <p>These terms are governed by the laws of the jurisdiction in which our business is registered. <em>Specify jurisdiction here before launch.</em></p>
+      <h3>11. Changes</h3>
+      <p>We may update these terms; the "Last updated" date will reflect the change. Continued use of the site after a change constitutes acceptance.</p>
+      <h3>12. Contact</h3>
+      <p>For questions about these terms, contact us via the <button className="link-button" onClick={() => window.location.assign('/contact')}>Contact page</button>.</p>
+    </section>
+  );
+}
+
+export function PrivacyPage() {
+  return (
+    <section className="section-pad page policy-page">
+      <SectionTitle eyebrow="Legal" title="Privacy Policy" />
+      {REVIEW_BANNER}
+      <p><em>Last updated: placeholder date — replace before launch.</em></p>
+      <h3>1. Data we collect</h3>
+      <ul>
+        <li><strong>Account data:</strong> name, email, optional phone, password hash, sign-in provider.</li>
+        <li><strong>Order data:</strong> items ordered, shipping address, billing reference.</li>
+        <li><strong>Payment data:</strong> a tokenised reference from our payment provider — we do NOT store full card numbers.</li>
+        <li><strong>Technical data:</strong> IP address, browser type, request timestamps (kept for security and abuse prevention).</li>
+      </ul>
+      <h3>2. How we use it</h3>
+      <p>To process your orders, send transactional emails, prevent fraud and abuse, comply with legal obligations, and improve the site.</p>
+      <h3>3. Third-party processors</h3>
+      <ul>
+        <li><strong>Payments:</strong> PayMongo, Maya, Xendit (whichever your order uses).</li>
+        <li><strong>Email:</strong> Resend, SendGrid, or Mailgun (whichever is configured).</li>
+        <li><strong>Error monitoring:</strong> Sentry (if enabled).</li>
+        <li><strong>Sign-in with Google:</strong> Google.</li>
+      </ul>
+      <p>Each processor has its own privacy policy. We share with them only the minimum data needed to perform their function.</p>
+      <h3>4. Cookies</h3>
+      <p>We use cookies for: keeping you signed in (HttpOnly session cookie), remembering your cart, and CSRF protection. We do not use third-party advertising cookies.</p>
+      <h3>5. Your rights</h3>
+      <p>Depending on your jurisdiction (GDPR, CCPA, Philippine DPA, etc.), you may have rights to: access, correct, delete, or export your data, and to object to processing. Contact us at the support email to exercise any of these rights.</p>
+      <h3>6. Retention</h3>
+      <p>Order records are kept for at least 7 years (tax / accounting compliance). Account data is kept while your account is active and deleted within 30 days of a verified erasure request, unless legally required to retain.</p>
+      <h3>7. Security</h3>
+      <p>Passwords are bcrypt-hashed. Payments are routed through PCI-compliant providers. Database connections use TLS. Admin accounts require two-factor authentication.</p>
+      <h3>8. Breach notification</h3>
+      <p>We will notify affected users within 72 hours of confirming a personal data breach, in line with applicable law.</p>
+      <h3>9. Changes</h3>
+      <p>We may update this policy; the "Last updated" date will reflect the change.</p>
+      <h3>10. Contact</h3>
+      <p>For privacy questions or data requests, contact us via the Contact page.</p>
+    </section>
+  );
+}
+
+export function RefundsPage() {
+  return (
+    <section className="section-pad page policy-page">
+      <SectionTitle eyebrow="Legal" title="Refund & Returns Policy" />
+      {REVIEW_BANNER}
+      <p><em>Last updated: placeholder date — replace before launch.</em></p>
+      <h3>Eligibility</h3>
+      <p>Items may be returned for a refund within <strong>14 days</strong> of delivery, unworn and in original condition, with original packaging and proof of purchase.</p>
+      <h3>Non-returnable items</h3>
+      <ul>
+        <li>Pierced jewelry (earrings) for hygiene reasons.</li>
+        <li>Custom or engraved pieces.</li>
+        <li>Final-sale and clearance items, where clearly marked.</li>
+      </ul>
+      <h3>How to start a return</h3>
+      <ol>
+        <li>Open the Contact page and select "Start a return".</li>
+        <li>Include your order number and the reason for the return.</li>
+        <li>We will email you a return label or instructions within 2 business days.</li>
+      </ol>
+      <h3>Refund timeline</h3>
+      <p>Once we receive and inspect the returned item, we will issue a refund to the original payment method within <strong>5 business days</strong>. Card and e-wallet providers may take an additional 3–10 days to post the credit on your end.</p>
+      <h3>Damaged or wrong item</h3>
+      <p>If your order arrives damaged or incorrect, contact us within 48 hours of delivery with photos. We will replace the item or issue a full refund at no cost to you.</p>
+      <h3>Cancellations</h3>
+      <p>Orders can be cancelled before they ship. Once shipped, you must use the return process above.</p>
+    </section>
+  );
+}
+
+export function ShippingPage() {
+  return (
+    <section className="section-pad page policy-page">
+      <SectionTitle eyebrow="Legal" title="Shipping Policy" />
+      {REVIEW_BANNER}
+      <p><em>Last updated: placeholder date — replace before launch.</em></p>
+      <h3>Carriers</h3>
+      <p>We currently ship via <strong>placeholder carrier names — replace before launch</strong> (e.g. LBC, J&amp;T, Ninja Van, DHL).</p>
+      <h3>Zones &amp; timelines</h3>
+      <table className="policy-table">
+        <thead><tr><th>Zone</th><th>Estimated delivery</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>Metro Manila</td><td>1–2 business days</td><td>Same-day available for orders placed before 11:00.</td></tr>
+          <tr><td>Luzon (outside Metro)</td><td>2–4 business days</td><td></td></tr>
+          <tr><td>Visayas / Mindanao</td><td>3–5 business days</td><td></td></tr>
+          <tr><td>International</td><td>7–14 business days</td><td>Customs delays possible; duties paid by recipient.</td></tr>
+        </tbody>
+      </table>
+      <h3>Shipping fees</h3>
+      <p>Calculated at checkout based on weight and destination. Free shipping on orders above the threshold shown on the cart page.</p>
+      <h3>Tracking</h3>
+      <p>Once your order ships you will receive a tracking number by email and on your account's order detail page.</p>
+      <h3>Address accuracy</h3>
+      <p>Please double-check your shipping address before placing the order. We are not responsible for orders sent to an incorrect address you provided. Re-shipping fees apply.</p>
+      <h3>Lost packages</h3>
+      <p>If tracking shows your package as delivered but you did not receive it, contact us within 7 days. We will open an investigation with the carrier and replace or refund per the outcome.</p>
+    </section>
+  );
+}
 
 function GoogleButton({ onGoogleLogin, setError, label = 'Continue with Google' }) {
   const googleConfigured = Boolean(import.meta.env.VITE_GOOGLE_CLIENT_ID);

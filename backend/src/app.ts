@@ -45,6 +45,27 @@ app.use(mongoSanitize());
 app.use(hpp());
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, limit: 250, standardHeaders: true, legacyHeaders: false }));
 
+// Tighter per-IP limiter on credential / 2FA endpoints. The per-account
+// lockout (failedLoginCount / lockedUntil) defends against attackers who
+// know the email; this defends against attackers blasting many emails from
+// one IP. Stacked, both are required for brute-force resistance.
+const credentialLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many authentication attempts from this IP. Please slow down.' }
+});
+const twoFaVerifyLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many 2FA attempts. Please slow down.' }
+});
+app.use(['/api/auth/login', '/api/auth/admin/login', '/api/auth/google', '/api/auth/forgot-password', '/api/auth/reset-password'], credentialLimiter);
+app.use('/api/auth/admin/2fa/login', twoFaVerifyLimiter);
+
 // Liveness — process is up. Used by load balancer.
 app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'luxe-api', uptime: process.uptime() });

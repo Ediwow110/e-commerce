@@ -3,7 +3,7 @@ import Header from './components/Header.jsx';
 import Footer from './components/Footer.jsx';
 import AdminLayout from './components/AdminLayout.jsx';
 import { adminSignIn, clearAuthStorage, customerSignIn, logout as performLogout, refreshSession, signInWithGoogle, signUp } from './services/api.js';
-import { CustomerHome, ShopPage, CategoryPage, ProductPage, WishlistPage, CartPage, CheckoutPage, ConfirmationPage, TrackingPage, AccountPage, SearchPage, AboutPage, ContactPage, PoliciesPage, LoginPage, RegisterPage, ForgotPasswordPage, ResetPasswordPage, AcceptInvitePage, AdminLoginPage, AdminPage, SectionTitle } from './pages/Home.jsx';
+import { CustomerHome, ShopPage, CategoryPage, ProductPage, WishlistPage, CartPage, CheckoutPage, ConfirmationPage, TrackingPage, AccountPage, SearchPage, AboutPage, ContactPage, PoliciesPage, TermsPage, PrivacyPage, RefundsPage, ShippingPage, LoginPage, RegisterPage, ForgotPasswordPage, ResetPasswordPage, AcceptInvitePage, AdminLoginPage, AdminPage, SectionTitle } from './pages/Home.jsx';
 
 const adminRoutes = ['admin-dashboard','admin-products','admin-variants','admin-categories','admin-inventory','admin-orders','admin-customers','admin-promos','admin-insights','admin-reviews','admin-reports','admin-payments','admin-shipping','admin-content','admin-users','admin-settings'];
 const customerProtectedRoutes = ['wishlist','checkout','confirmation','tracking','account'];
@@ -44,6 +44,10 @@ const pathToRoute = (path) => {
     '/about': 'about',
     '/contact': 'contact',
     '/policies': 'policies',
+    '/terms': 'terms',
+    '/privacy': 'privacy',
+    '/refunds': 'refunds',
+    '/shipping': 'shipping',
     '/customer/login': 'customer-login',
     '/customer/register': 'customer-register',
     '/customer/forgot-password': 'forgot-password',
@@ -57,7 +61,7 @@ const pathToRoute = (path) => {
 };
 
 const routeToPath = (route) => ({
-  home: '/', shop: '/shop', category: '/categories', product: '/product', wishlist: '/wishlist', cart: '/cart', checkout: '/checkout', confirmation: '/order-confirmation', tracking: '/track-order', account: '/account', search: '/search', about: '/about', contact: '/contact', policies: '/policies',
+  home: '/', shop: '/shop', category: '/categories', product: '/product', wishlist: '/wishlist', cart: '/cart', checkout: '/checkout', confirmation: '/order-confirmation', tracking: '/track-order', account: '/account', search: '/search', about: '/about', contact: '/contact', policies: '/policies', terms: '/terms', privacy: '/privacy', refunds: '/refunds', shipping: '/shipping',
   'customer-login': '/customer/login', 'customer-register': '/customer/register', 'forgot-password': '/customer/forgot-password', 'reset-password': '/customer/reset-password', 'admin-login': '/admin/login', 'admin-accept-invite': '/admin/accept-invite', 'admin-dashboard': '/admin/dashboard'
 }[route] || (route.startsWith('admin-') ? '/admin/' + route.replace('admin-', '').replace(/-/g, '/') : '/'));
 
@@ -179,7 +183,11 @@ export default function App() {
       search: <SearchPage {...props} />,
       about: <AboutPage {...props} />,
       contact: <ContactPage {...props} />,
-      policies: <PoliciesPage {...props} />
+      policies: <PoliciesPage {...props} />,
+      terms: <TermsPage {...props} />,
+      privacy: <PrivacyPage {...props} />,
+      refunds: <RefundsPage {...props} />,
+      shipping: <ShippingPage {...props} />
     })[route] || <CustomerHome {...props} />;
   }
 

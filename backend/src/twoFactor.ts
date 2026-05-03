@@ -17,9 +17,25 @@ import { ApiError } from './errors.js';
  * Backup codes: 10 single-use codes; bcrypt-hashed at rest; lookup is O(N) on consume.
  */
 
+import { env } from './env.js';
+
 authenticator.options = { window: 1, step: 30 };
 
 export const TWO_FA_REQUIRED_ROLES = new Set(['ADMIN', 'SUPER_ADMIN', 'MANAGER']);
+
+/**
+ * Returns true if 2FA must be enforced for this role in the current
+ * environment. In `LAUNCH_MODE=production`, the staff/dangerous roles always
+ * require 2FA regardless of the `ENFORCE_ADMIN_2FA` flag (defence in depth —
+ * the preflight also blocks production boot when the flag is `false`, but
+ * this guard means even a misconfigured deploy can never let an unenrolled
+ * admin through).
+ */
+export function isTwoFactorRequired(role: string): boolean {
+  if (!TWO_FA_REQUIRED_ROLES.has(role)) return false;
+  if (env.LAUNCH_MODE === 'production') return true;
+  return env.ENFORCE_ADMIN_2FA === 'true';
+}
 
 export function generateSecret(): string {
   return authenticator.generateSecret();
@@ -76,7 +92,7 @@ export async function consumeBackupCode(userId: string, code: string): Promise<b
 
 /** Throws if the role requires 2FA but the user has not enrolled. */
 export function assertTwoFactorEnrolled(role: string, user: { twoFactorEnabled: boolean }) {
-  if (TWO_FA_REQUIRED_ROLES.has(role) && !user.twoFactorEnabled) {
+  if (isTwoFactorRequired(role) && !user.twoFactorEnabled) {
     throw new ApiError(403, 'Two-factor authentication is required for this role. Please enrol at /admin/security.');
   }
 }

@@ -10,8 +10,11 @@ export default function Footer({ setRoute }) {
       <div className="footer-grid">
         <button onClick={() => setRoute('shop')}>Shop</button>
         <button onClick={() => setRoute('tracking')}>Track Order</button>
-        <button onClick={() => setRoute('policies')}>Policies</button>
         <button onClick={() => setRoute('contact')}>Contact</button>
+        <button onClick={() => setRoute('terms')}>Terms of Service</button>
+        <button onClick={() => setRoute('privacy')}>Privacy Policy</button>
+        <button onClick={() => setRoute('refunds')}>Refund Policy</button>
+        <button onClick={() => setRoute('shipping')}>Shipping Policy</button>
       </div>
     </footer>
   );

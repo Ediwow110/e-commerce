@@ -3,6 +3,11 @@ import { z } from 'zod';
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  // LAUNCH_MODE is the *intent* of the deploy — independent of NODE_ENV.
+  //   local       — developer machine
+  //   staging     — sandbox payments, test mail provider OK, debug allowed
+  //   production  — real money, real customers, strictest gates apply
+  LAUNCH_MODE: z.enum(['local', 'staging', 'production']).default('local'),
   PORT: z.coerce.number().default(8080),
   DATABASE_URL: z.string().min(1),
   JWT_ACCESS_SECRET: z.string().min(32),
@@ -33,11 +38,16 @@ const schema = z.object({
   SENDGRID_API_KEY: z.string().optional(),
   MAILGUN_API_KEY: z.string().optional(),
   MAILGUN_DOMAIN: z.string().optional(),
+  SUPPORT_EMAIL: z.string().email().optional(),
 
   // Auth
   LOGIN_LOCKOUT_THRESHOLD: z.coerce.number().int().positive().default(8),
   LOGIN_LOCKOUT_DURATION_MINUTES: z.coerce.number().int().positive().default(15),
   ENFORCE_ADMIN_2FA: z.enum(['true', 'false']).default('false'),
+
+  // Rate limiting
+  RATE_LIMIT_STORE: z.enum(['memory', 'redis']).default('memory'),
+  REDIS_URL: z.string().optional(),
 
   // Observability
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).optional(),
@@ -50,19 +60,11 @@ const schema = z.object({
 
 export const env = schema.parse(process.env);
 
+// NOTE: Detailed boot-time validation lives in `preflight.ts` which is invoked
+// from `server.ts`. The lightweight checks below remain for callers that
+// import `env` without booting the HTTP server (CLI scripts, tests).
 if (env.NODE_ENV === 'production') {
-  const corsOrigin = env.CORS_ORIGIN.trim();
-  if (!corsOrigin || corsOrigin === '*' || corsOrigin.includes('localhost') || corsOrigin.includes('127.0.0.1')) {
-    throw new Error('CORS_ORIGIN must be set to your production domain (e.g. https://www.yourdomain.com), not localhost or wildcard, in production');
-  }
-  if (!env.PAYMENT_WEBHOOK_SECRET) throw new Error('PAYMENT_WEBHOOK_SECRET is required in production');
-  if (env.JWT_ACCESS_SECRET === env.JWT_REFRESH_SECRET) throw new Error('JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must differ in production');
-  if (env.PAYMENT_PROVIDER_DEFAULT === 'mock') throw new Error('PAYMENT_PROVIDER_DEFAULT cannot be "mock" in production');
-  if (env.PAYMENT_PROVIDER_DEFAULT === 'paymongo' && !env.PAYMONGO_SECRET_KEY) throw new Error('PAYMONGO_SECRET_KEY required when PAYMENT_PROVIDER_DEFAULT=paymongo in production');
-  if (env.PAYMENT_PROVIDER_DEFAULT === 'maya' && (!env.MAYA_SECRET_KEY || !env.MAYA_WEBHOOK_AUTH)) throw new Error('MAYA_SECRET_KEY and MAYA_WEBHOOK_AUTH required when PAYMENT_PROVIDER_DEFAULT=maya in production');
-  if (env.PAYMENT_PROVIDER_DEFAULT === 'xendit' && (!env.XENDIT_SECRET_KEY || !env.XENDIT_CALLBACK_TOKEN)) throw new Error('XENDIT_SECRET_KEY and XENDIT_CALLBACK_TOKEN required when PAYMENT_PROVIDER_DEFAULT=xendit in production');
-  if (env.MAIL_PROVIDER === 'mock') {
-    // eslint-disable-next-line no-console
-    console.warn('[env] WARNING: MAIL_PROVIDER=mock in production — customers will not receive emails.');
+  if (env.JWT_ACCESS_SECRET === env.JWT_REFRESH_SECRET) {
+    throw new Error('JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must differ in production');
   }
 }
