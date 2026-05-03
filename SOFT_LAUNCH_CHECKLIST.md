@@ -11,7 +11,7 @@ announcing the store.
 ### Code & infrastructure
 
 - [ ] CI green on the deploying commit (`https://github.com/Ediwow110/e-commerce/actions`).
-- [ ] All 53 tests pass against live Postgres in CI.
+- [ ] All 74 tests pass against live Postgres in CI.
 - [ ] Latest commit reviewed by at least one human besides the author.
 - [ ] Container image tagged with the commit SHA.
 - [ ] `LAUNCH_MODE=production` in the deployed env.

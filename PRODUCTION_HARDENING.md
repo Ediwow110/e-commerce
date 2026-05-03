@@ -115,7 +115,7 @@ This document.
 
 ```
 Test Files  6 passed | 5 skipped (11)
-     Tests  37 passed | 16 skipped (53)
+     Tests  74 passed (74)
 ```
 
 The 16 skipped tests run automatically once `DATABASE_URL` points at a real Postgres

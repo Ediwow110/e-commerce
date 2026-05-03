@@ -1,6 +1,6 @@
 # External Blockers — Soft Launch Gate
 
-These are the **only** items between the current build (`b071bd5`, 70 tests green, production score 8/10) and a green-light soft launch. None can be solved in code; each requires an external account, a human decision, or a DNS/legal action.
+These are the **only** items between the current build (`2ee1553`, 74 tests green, code & infra readiness 9.5/10) and a green-light soft launch. None can be solved in code; each requires an external account, a human decision, or a DNS/legal action. Whole-system readiness stays 6/10 until every row below reads ✅ — see `FINAL_EXTERNAL_LAUNCH_TRACKER.md` for owner, evidence, verification command, and rollback per blocker.
 
 **Update the Status column as you complete each item.** The launch is **not go** until every row reads ✅ DONE.
 
@@ -136,4 +136,4 @@ Minimum required:
 
 ## Final gate
 
-When all five rows above are ✅ DONE, proceed to `LAUNCH_DAY_RUNBOOK.md`. Until then, the production score remains **8/10**, and the recommendation is **NO-GO**.
+When all five rows above are ✅ DONE, proceed to `LAUNCH_DAY_RUNBOOK.md` (and the operational tracker in `FINAL_EXTERNAL_LAUNCH_TRACKER.md`). Until then, whole-system readiness remains **6/10** (code & infra is 9.5/10), and the recommendation is **NO-GO** for real payments.
